@@ -106,7 +106,9 @@ async function renderPage(page: { getViewport: (value: { scale: number }) => { w
   const context = canvas.getContext("2d", { alpha: false });
   if (!context) throw new Error("Canvas rendering is unavailable in this browser.");
   await page.render({ canvas, canvasContext: context, viewport }).promise;
-  return canvas.toDataURL("image/jpeg", 0.86);
+  // Keep the original page and committed canvas text at the same quality.
+  // JPEG artifacts made replacement text look different from the source page.
+  return canvas.toDataURL("image/png");
 }
 
 export interface PdfLoadProgress {

@@ -412,9 +412,9 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
 
 function PageRenderSurface({ page, mutedTextId }: { page: DocumentPage; mutedTextId: string | null }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const maskSignature = page.objects
+  const replacementSignature = page.objects
     .filter((object): object is TextBlock => object.type === "text" && object.source === "native-pdf" && (object.id === mutedTextId || object.originalText !== object.text))
-    .map((object) => `${object.id}:${object.text}`)
+    .map((object) => `${object.id}:${object.text}:${object.style.fontFamily}:${object.style.fontSize}:${object.style.fontWeight}:${object.style.fontStyle}:${object.style.color}:${object.style.letterSpacing}:${object.direction}`)
     .join("|");
 
   useEffect(() => {
@@ -422,7 +422,12 @@ function PageRenderSurface({ page, mutedTextId }: { page: DocumentPage; mutedTex
     let disposed = false;
     const canvas = canvasRef.current;
     const image = new Image();
-    image.onload = () => {
+    image.onload = async () => {
+      if (disposed) return;
+      const replacements = page.objects.filter(
+        (object): object is TextBlock => object.type === "text" && object.source === "native-pdf" && (object.id === mutedTextId || object.originalText !== object.text),
+      );
+      await Promise.all(replacements.map((object) => document.fonts.load(canvasFont(object, 1), object.text).catch(() => [])));
       if (disposed) return;
       canvas.width = image.naturalWidth;
       canvas.height = image.naturalHeight;
@@ -431,16 +436,49 @@ function PageRenderSurface({ page, mutedTextId }: { page: DocumentPage; mutedTex
       context.drawImage(image, 0, 0);
       const scaleX = canvas.width / page.width;
       const scaleY = canvas.height / page.height;
-      page.objects
-        .filter((object): object is TextBlock => object.type === "text" && object.source === "native-pdf" && (object.id === mutedTextId || object.originalText !== object.text))
-        .forEach((object) => concealSourceText(context, object, scaleX, scaleY));
+      replacements.forEach((object) => {
+        concealSourceText(context, object, scaleX, scaleY);
+        if (object.id !== mutedTextId) paintNativeTextReplacement(context, object, scaleX, scaleY);
+      });
     };
     image.src = page.background;
     return () => { disposed = true; };
-  }, [page, mutedTextId, maskSignature]);
+  }, [page, mutedTextId, replacementSignature]);
 
   if (!page.background) return null;
   return <canvas ref={canvasRef} className="page-render-surface" aria-hidden="true" />;
+}
+
+function canvasFont(object: TextBlock, pixelScale: number): string {
+  return `${object.style.fontStyle} ${object.style.fontWeight} ${object.style.fontSize * pixelScale}px ${object.style.fontFamily}`;
+}
+
+function paintNativeTextReplacement(context: CanvasRenderingContext2D, object: TextBlock, scaleX: number, scaleY: number): void {
+  const verticalScale = Math.max(0.001, Math.hypot(object.transform.c, object.transform.d));
+  const horizontalScale = Math.hypot(object.transform.a, object.transform.b);
+  const textScale = (horizontalScale / verticalScale) * (scaleX / scaleY);
+  context.save();
+  context.translate(object.bbox.x * scaleX, (object.bbox.y + object.style.fontSize) * scaleY);
+  context.scale(textScale, 1);
+  context.font = canvasFont(object, scaleY);
+  context.fillStyle = object.style.color;
+  context.textBaseline = "alphabetic";
+  context.textAlign = object.style.align === "right" ? "right" : object.style.align === "center" ? "center" : "left";
+  context.direction = object.direction === "auto" ? "inherit" : object.direction;
+  drawCanvasText(context, object.text, object.style.letterSpacing * scaleY);
+  context.restore();
+}
+
+function drawCanvasText(context: CanvasRenderingContext2D, text: string, letterSpacing: number): void {
+  if (!letterSpacing) {
+    context.fillText(text, 0, 0);
+    return;
+  }
+  let advance = 0;
+  for (const glyph of Array.from(text)) {
+    context.fillText(glyph, advance, 0);
+    advance += context.measureText(glyph).width + letterSpacing;
+  }
 }
 
 function concealSourceText(context: CanvasRenderingContext2D, object: TextBlock, scaleX: number, scaleY: number): void {

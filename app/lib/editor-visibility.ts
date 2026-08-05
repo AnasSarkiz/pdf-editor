@@ -1,13 +1,14 @@
 import type { TextBlock } from "./document-model";
 
 /**
- * Native PDF pages keep a rendered source preview underneath the semantic
- * objects. Unchanged native text can stay hidden over that preview, but an
- * edited block must remain rendered after its inline editor loses focus.
+ * Native PDF pages keep their source preview on a shared canvas. Native text
+ * is only rendered in the DOM while an inline editor is active; committed
+ * replacements are painted back onto that source canvas so their smoothing
+ * matches the original PDF preview.
  */
 export function shouldRenderTextContent(object: TextBlock, pageHasBackground: boolean, isInlineEditing: boolean): boolean {
   if (!pageHasBackground || isInlineEditing || object.source !== "native-pdf") return true;
-  return object.originalText !== object.text;
+  return false;
 }
 
 export function isTextReplacementPreview(object: TextBlock, pageHasBackground: boolean, isInlineEditing: boolean): boolean {

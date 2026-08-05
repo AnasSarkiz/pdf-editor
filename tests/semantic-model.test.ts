@@ -35,12 +35,12 @@ test("export is explicitly held when a reconstruction needs Arabic shaping", () 
   assert.match(readiness.messages.join(" "), /Arabic/);
 });
 
-test("an edited native text block remains visible after inline editing ends", () => {
+test("an edited native text block returns to the shared page canvas after inline editing ends", () => {
   const document = createDemoDocument();
   const text = document.pages[0].objects.find((object) => object.type === "text");
   assert.ok(text && text.type === "text");
   text.text = "Updated semantic text";
-  assert.equal(shouldRenderTextContent(text, true, false), true);
+  assert.equal(shouldRenderTextContent(text, true, false), false);
   assert.equal(isTextReplacementPreview(text, true, false), true);
 });
 
