@@ -73,6 +73,29 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
+const MIN_TEXT_BOX_WIDTH = 24;
+const MIN_TEXT_BOX_HEIGHT = 20;
+
+function fitTextBounds(text: string, bbox: Rect, pageWidth: number, pageHeight: number, style: TextStyle, minimum: Pick<Rect, "width" | "height"> = { width: 0, height: 0 }): Rect {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  const lines = text.split(/\r?\n/);
+  let widestLine = 0;
+  if (context) {
+    context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize}px ${style.fontFamily}`;
+    widestLine = Math.max(...lines.map((line) => context.measureText(line || " ").width + Math.max(0, line.length - 1) * style.letterSpacing));
+  } else {
+    widestLine = Math.max(...lines.map((line) => Math.max(1, line.length) * style.fontSize * 0.58));
+  }
+  const availableWidth = Math.max(MIN_TEXT_BOX_WIDTH, pageWidth - bbox.x);
+  const availableHeight = Math.max(MIN_TEXT_BOX_HEIGHT, pageHeight - bbox.y);
+  return {
+    ...bbox,
+    width: clamp(Math.max(MIN_TEXT_BOX_WIDTH, minimum.width, widestLine + 4), MIN_TEXT_BOX_WIDTH, availableWidth),
+    height: clamp(Math.max(MIN_TEXT_BOX_HEIGHT, minimum.height, lines.length * style.fontSize * style.lineHeight + 4), MIN_TEXT_BOX_HEIGHT, availableHeight),
+  };
+}
+
 export default function Home() {
   const [documentModel, setDocumentModel] = useState<EditableDocument>(() => createDemoDocument());
   const [originalBytes, setOriginalBytes] = useState<Uint8Array>();
@@ -139,11 +162,13 @@ export default function Home() {
 
   function addText(): void {
     if (!page) return;
+    const style = { ...defaultTextStyle, fontSize: 16, color: "#0f766e" };
+    const anchor = { x: 72, y: Math.min(page.height - 90, 520), width: 0, height: 0 };
     const newObject: TextBlock = {
       id: stableId("user-text"),
       type: "text",
       pageId: page.id,
-      bbox: { x: 72, y: Math.min(page.height - 90, 520), width: Math.min(320, page.width - 144), height: 32 },
+      bbox: fitTextBounds("New text", anchor, page.width, page.height, style),
       rotation: 0,
       transform: identityMatrix,
       confidence: 1,
@@ -153,7 +178,7 @@ export default function Home() {
       ...detectTextMeta("New text"),
       text: "New text",
       originalText: "",
-      style: { ...defaultTextStyle, fontSize: 16, color: "#0f766e" },
+      style,
       overflow: "warn",
       editable: true,
     };
@@ -193,6 +218,23 @@ export default function Home() {
     setSelectedId(object.id);
     setActiveTool("select");
     setNotice("Object moved. Use Undo to restore its original position.");
+  }
+
+  function resizeObject(object: TextBlock, bbox: Rect): void {
+    if (object.bbox.width === bbox.width && object.bbox.height === bbox.height) return;
+    commit({
+      id: stableId("op"),
+      type: "resize",
+      targetId: object.id,
+      pageId: object.pageId,
+      at: new Date().toISOString(),
+      before: object,
+      after: { ...object, bbox },
+      label: `Resized ${objectLabel(object)}`,
+    });
+    setSelectedId(object.id);
+    setActiveTool("select");
+    setNotice("Text box resized. Use Undo to restore its previous size.");
   }
 
   async function onFileChange(event: ChangeEvent<HTMLInputElement>): Promise<void> {
@@ -360,9 +402,10 @@ export default function Home() {
                   matched={matchingIds.has(object.id)}
                   onSelect={() => { setSelectedId(object.id); setActiveTool("select"); }}
                   onEdit={() => object.type === "text" && setInlineEditing(object.id)}
-                  onTextCommit={(value) => object.type === "text" && updateSelected({ text: value, ...detectTextMeta(value) }, "Edited text")}
+                  onTextCommit={(value, bbox) => object.type === "text" && updateSelected({ text: value, ...detectTextMeta(value), ...(bbox ? { bbox } : {}) }, "Edited text")}
                   onEditEnd={() => setInlineEditing(null)}
                   onMove={(bbox) => moveObject(object, bbox)}
+                  onResize={(bbox) => object.type === "text" && resizeObject(object, bbox)}
                   editing={inlineEditing === object.id}
                 />
               ))}
@@ -375,7 +418,7 @@ export default function Home() {
           <nav className="inspector-tabs" aria-label="Inspector sections">
             {(["properties", "layers", "review", "search"] as Panel[]).map((panel) => <button key={panel} className={activePanel === panel ? "is-active" : ""} onClick={() => setActivePanel(panel)}>{panel}</button>)}
           </nav>
-          {activePanel === "properties" && <PropertiesPanel selected={selected} onTextChange={(text) => updateSelected({ text, ...detectTextMeta(text) }, "Edited text")} onStyleChange={(style) => selected?.type === "text" && updateSelected({ style: { ...selected.style, ...style } }, "Changed text style")} onDirectionChange={(direction) => updateSelected({ direction }, "Changed paragraph direction")} onDelete={deleteSelected} onDuplicate={duplicateSelected} />}
+          {activePanel === "properties" && <PropertiesPanel selected={selected} onTextChange={(text) => selected?.type === "text" && updateSelected({ text, ...detectTextMeta(text), ...(selected.source === "user" ? { bbox: fitTextBounds(text, selected.bbox, page.width, page.height, selected.style, selected.bbox) } : {}) }, "Edited text")} onStyleChange={(style) => selected?.type === "text" && updateSelected({ style: { ...selected.style, ...style } }, "Changed text style")} onDirectionChange={(direction) => selected?.type === "text" && updateSelected({ direction }, "Changed paragraph direction")} onDelete={deleteSelected} onDuplicate={duplicateSelected} />}
           {activePanel === "layers" && <LayersPanel page={page} selectedId={selectedId} onSelect={setSelectedId} />}
           {activePanel === "review" && <ReviewPanel page={page} readiness={exportReadiness} />}
           {activePanel === "search" && <SearchPanel search={search} setSearch={setSearch} document={documentModel} onSelect={(id) => { setSelectedId(id); const located = findObject(documentModel, id); if (located) setCurrentPageIndex(located.pageIndex); }} />}
@@ -394,16 +437,20 @@ export default function Home() {
   );
 }
 
-function SemanticObject({ object, pageWidth, pageHeight, selected, matched, showContent, replacementPreview, editing, onSelect, onEdit, onTextCommit, onEditEnd, onMove }: { object: PageObject; pageWidth: number; pageHeight: number; selected: boolean; matched: boolean; showContent: boolean; replacementPreview: boolean; editing: boolean; onSelect: () => void; onEdit: () => void; onTextCommit: (value: string) => void; onEditEnd: () => void; onMove: (bbox: Rect) => void }) {
+function SemanticObject({ object, pageWidth, pageHeight, selected, matched, showContent, replacementPreview, editing, onSelect, onEdit, onTextCommit, onEditEnd, onMove, onResize }: { object: PageObject; pageWidth: number; pageHeight: number; selected: boolean; matched: boolean; showContent: boolean; replacementPreview: boolean; editing: boolean; onSelect: () => void; onEdit: () => void; onTextCommit: (value: string, bbox?: Rect) => void; onEditEnd: () => void; onMove: (bbox: Rect) => void; onResize: (bbox: Rect) => void }) {
   const [draftText, setDraftText] = useState(object.type === "text" ? object.text : "");
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
+  const [draftBbox, setDraftBbox] = useState<Rect | null>(null);
+  const [resizeBbox, setResizeBbox] = useState<Rect | null>(null);
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; startBbox: Rect; paper: DOMRect; offset: { x: number; y: number } } | null>(null);
+  const resizeRef = useRef<{ pointerId: number; startX: number; startY: number; startBbox: Rect; paper: DOMRect; bbox: Rect } | null>(null);
   const isDragging = dragOffset !== null;
+  const displayBbox = resizeBbox ?? draftBbox ?? object.bbox;
   const style = {
-    left: `${((object.bbox.x + (dragOffset?.x ?? 0)) / pageWidth) * 100}%`,
-    top: `${((object.bbox.y + (dragOffset?.y ?? 0)) / pageHeight) * 100}%`,
-    width: `${(object.bbox.width / pageWidth) * 100}%`,
-    height: `${(object.bbox.height / pageHeight) * 100}%`,
+    left: `${((displayBbox.x + (dragOffset?.x ?? 0)) / pageWidth) * 100}%`,
+    top: `${((displayBbox.y + (dragOffset?.y ?? 0)) / pageHeight) * 100}%`,
+    width: `${(displayBbox.width / pageWidth) * 100}%`,
+    height: `${(displayBbox.height / pageHeight) * 100}%`,
   };
   if (object.type === "table") {
     return <button className={`semantic-object table-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""}`} style={style} onClick={onSelect} aria-label="Recognized table"><span className="table-object-label">{object.rows} × {object.columns} table · {formatConfidence(object.confidence)}</span></button>;
@@ -411,7 +458,9 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
   if (object.type === "form-field") return <button className={`semantic-object field-object ${selected ? "is-selected" : ""}`} style={style} onClick={onSelect} aria-label={`Form field ${object.name}`} />;
   if (object.type !== "text") return <button className={`semantic-object ${selected ? "is-selected" : ""}`} style={style} onClick={onSelect} aria-label={object.type} />;
   const finishEditing = () => {
-    if (draftText !== object.text) onTextCommit(draftText);
+    const fittedBbox = object.source === "user" ? fitTextBounds(draftText, object.bbox, pageWidth, pageHeight, object.style, object.bbox) : undefined;
+    if (draftText !== object.text || (fittedBbox && (fittedBbox.width !== object.bbox.width || fittedBbox.height !== object.bbox.height))) onTextCommit(draftText, fittedBbox);
+    setDraftBbox(null);
     onEditEnd();
   };
   const startEditing = () => {
@@ -448,6 +497,41 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     dragRef.current = null;
     setDragOffset(null);
   };
+  const startResizing = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (editing || (event.pointerType === "mouse" && event.button !== 0)) return;
+    const paper = event.currentTarget.closest(".paper")?.getBoundingClientRect();
+    if (!paper) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startBbox: { ...object.bbox }, paper, bbox: { ...object.bbox } };
+  };
+  const updateResizing = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const next = {
+      ...resize.startBbox,
+      width: clamp(resize.startBbox.width + ((event.clientX - resize.startX) / resize.paper.width) * pageWidth, MIN_TEXT_BOX_WIDTH, Math.max(MIN_TEXT_BOX_WIDTH, pageWidth - resize.startBbox.x)),
+      height: clamp(resize.startBbox.height + ((event.clientY - resize.startY) / resize.paper.height) * pageHeight, MIN_TEXT_BOX_HEIGHT, Math.max(MIN_TEXT_BOX_HEIGHT, pageHeight - resize.startBbox.y)),
+    };
+    resize.bbox = next;
+    setResizeBbox(next);
+  };
+  const finishResizing = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    resizeRef.current = null;
+    setResizeBbox(null);
+    onResize(resize.bbox);
+  };
+  const cancelResizing = () => {
+    resizeRef.current = null;
+    setResizeBbox(null);
+  };
   const textStyle = {
     color: object.style.color,
     // PDF.js registers the embedded subset font under this exact family name
@@ -462,7 +546,8 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     textAlign: object.style.align,
   };
   return <div className={`semantic-object text-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""} ${showContent || isDragging ? "show-content" : ""} ${replacementPreview ? "is-replacement-preview" : ""} ${isDragging ? "is-dragging" : ""}`} style={style} onClick={(event) => { event.stopPropagation(); onSelect(); }} onDoubleClick={startEditing} onPointerDown={startDragging} onPointerMove={updateDragging} onPointerUp={finishDragging} onPointerCancel={cancelDragging} role="button" tabIndex={0} aria-label={`Text: ${objectLabel(object)}${replacementPreview ? " (edited preview)" : ""}`}>
-    {editing ? <textarea autoFocus wrap="off" value={draftText} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => setDraftText(event.target.value)} onBlur={finishEditing} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDraftText(object.text); onEditEnd(); } }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent || isDragging ? object.text : ""}</span>}
+    {editing ? <textarea autoFocus wrap="off" value={draftText} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => { const value = event.target.value; setDraftText(value); if (object.source === "user") setDraftBbox(fitTextBounds(value, object.bbox, pageWidth, pageHeight, object.style, object.bbox)); }} onBlur={finishEditing} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDraftText(object.text); setDraftBbox(null); onEditEnd(); } }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent || isDragging ? object.text : ""}</span>}
+    {selected && !editing && <button className="text-resize-handle" aria-label="Resize text box" title="Drag to resize text box" onClick={(event) => event.stopPropagation()} onPointerDown={startResizing} onPointerMove={updateResizing} onPointerUp={finishResizing} onPointerCancel={cancelResizing} />}
     {selected && !replacementPreview && <span className="object-source">{object.source === "native-pdf" ? "native" : object.source}</span>}
   </div>;
 }
