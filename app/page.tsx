@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { downloadPdf, exportPdf, getExportReadiness } from "./lib/export-engine";
 import type { EditableDocument, EditOperation, PageObject, TextBlock, TextDirection, TextStyle } from "./lib/document-model";
 import { createDemoDocument, defaultTextStyle, detectTextMeta, identityMatrix, stableId } from "./lib/document-model";
@@ -294,7 +294,13 @@ export default function Home() {
           <div className="thumbnails">
             {documentModel.pages.map((entry, index) => (
               <button className={`thumbnail ${index === currentPageIndex ? "is-current" : ""}`} key={entry.id} onClick={() => { setCurrentPageIndex(index); setSelectedId(null); }}>
-                <div className="thumbnail-paper" style={entry.background ? { backgroundImage: `url(${entry.background})` } : undefined}>
+                <div
+                  className={`thumbnail-paper ${entry.background ? "has-background" : ""}`}
+                  style={{
+                    aspectRatio: `${entry.width} / ${entry.height}`,
+                    ...(entry.background ? { backgroundImage: `url(${entry.background})` } : {}),
+                  }}
+                >
                   {!entry.background && entry.objects.filter((object) => object.type === "text").slice(0, 4).map((object) => <i key={object.id} style={{ top: `${(object.bbox.y / entry.height) * 100}%`, width: `${Math.min(80, (object.bbox.width / entry.width) * 100)}%` }} />)}
                 </div>
                 <span>{entry.number}</span>
@@ -310,7 +316,13 @@ export default function Home() {
             <div className={`analysis-chip ${page.analysisStatus === "needs-review" ? "needs-review" : ""}`}><span /> {page.sourceKind === "scan" ? "OCR review" : page.sourceKind === "hybrid" ? "Hybrid analysis" : "Native extraction"}</div>
           </div>
           <div className="paper-wrap" style={{ width: `${zoom}%` }}>
-            <div className={`paper ${page.background ? "has-background" : ""}`} style={page.background ? { backgroundImage: `url(${page.background})` } : undefined}>
+            <div
+              className={`paper ${page.background ? "has-background" : ""}`}
+              style={{
+                aspectRatio: `${page.width} / ${page.height}`,
+                ...(page.background ? { backgroundImage: `url(${page.background})` } : {}),
+              } as CSSProperties}
+            >
               {!page.background && <div className="demo-folio">NASKH / 01</div>}
               {page.objects.map((object) => (
                 <SemanticObject
