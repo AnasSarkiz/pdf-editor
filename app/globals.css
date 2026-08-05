@@ -83,7 +83,9 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .semantic-object { position: absolute; margin: 0; padding: 0; border: 0; outline: 0; background: transparent; }
 .semantic-object.is-selected { z-index: 5; outline: 1.5px solid #25a998; box-shadow: 0 0 0 2px rgba(37,169,152,.16); }
 .semantic-object.is-matched { background: rgba(240,193,74,.25); box-shadow: 0 0 0 2px rgba(240,193,74,.38); }
-.text-object { min-height: 15px; cursor: text; }
+.text-object { min-height: 15px; cursor: grab; touch-action: none; }
+.text-object.is-dragging { cursor: grabbing; }
+.text-object:has(textarea) { cursor: text; }
 .text-object > span { display: block; width: 100%; height: 100%; overflow: visible; white-space: pre; unicode-bidi: plaintext; }
 .text-object:not(.show-content) > span { color: transparent !important; }
 .text-object.is-replacement-preview > span { padding: 1px 2px; text-rendering: geometricPrecision; -webkit-font-smoothing: antialiased; }

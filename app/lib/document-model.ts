@@ -55,6 +55,8 @@ export interface SemanticObjectBase {
 export interface TextBlock extends SemanticObjectBase {
   type: "text";
   text: string;
+  /** Immutable source placement used to remove moved native text from the page preview. */
+  originalBbox?: Rect;
   style: TextStyle;
   originalText?: string;
   overflow: "shrink" | "expand" | "reflow" | "allow" | "warn";

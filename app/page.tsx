@@ -1,10 +1,10 @@
 "use client";
 
-import { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { downloadPdf, exportPdf, getExportReadiness } from "./lib/export-engine";
-import type { DocumentPage, EditableDocument, EditOperation, PageObject, TextBlock, TextDirection, TextStyle } from "./lib/document-model";
+import type { DocumentPage, EditableDocument, EditOperation, PageObject, Rect, TextBlock, TextDirection, TextStyle } from "./lib/document-model";
 import { createDemoDocument, defaultTextStyle, detectTextMeta, identityMatrix, stableId } from "./lib/document-model";
-import { isTextReplacementPreview, shouldRenderTextContent } from "./lib/editor-visibility";
+import { isTextReplacementPreview, needsNativeCanvasReplacement, shouldRenderTextContent } from "./lib/editor-visibility";
 import { importPdf, type PdfLoadProgress } from "./lib/pdf-core";
 
 type Tool = "select" | "text" | "table" | "image" | "shape" | "signature" | "form" | "hand";
@@ -67,6 +67,10 @@ function objectLabel(object: PageObject): string {
 
 function formatConfidence(confidence: number): string {
   return `${Math.round(confidence * 100)}%`;
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
 }
 
 export default function Home() {
@@ -172,6 +176,23 @@ export default function Home() {
     const duplicate = { ...cloneDocument({ ...documentModel, pages: [{ ...page, objects: [selected] }] }).pages[0].objects[0], id: stableId(selected.type), bbox: { ...selected.bbox, x: selected.bbox.x + 18, y: selected.bbox.y + 18 }, source: "user" as const };
     commit({ id: stableId("op"), type: "create", targetId: duplicate.id, pageId: page.id, at: new Date().toISOString(), after: duplicate, label: `Duplicated ${objectLabel(selected)}` });
     setSelectedId(duplicate.id);
+  }
+
+  function moveObject(object: PageObject, bbox: Rect): void {
+    if (object.bbox.x === bbox.x && object.bbox.y === bbox.y) return;
+    commit({
+      id: stableId("op"),
+      type: "move",
+      targetId: object.id,
+      pageId: object.pageId,
+      at: new Date().toISOString(),
+      before: object,
+      after: { ...object, bbox },
+      label: `Moved ${objectLabel(object)}`,
+    });
+    setSelectedId(object.id);
+    setActiveTool("select");
+    setNotice("Object moved. Use Undo to restore its original position.");
   }
 
   async function onFileChange(event: ChangeEvent<HTMLInputElement>): Promise<void> {
@@ -339,6 +360,7 @@ export default function Home() {
                   onEdit={() => object.type === "text" && setInlineEditing(object.id)}
                   onTextCommit={(value) => object.type === "text" && updateSelected({ text: value, ...detectTextMeta(value) }, "Edited text")}
                   onEditEnd={() => setInlineEditing(null)}
+                  onMove={(bbox) => moveObject(object, bbox)}
                   editing={inlineEditing === object.id}
                 />
               ))}
@@ -370,11 +392,14 @@ export default function Home() {
   );
 }
 
-function SemanticObject({ object, pageWidth, pageHeight, selected, matched, showContent, replacementPreview, editing, onSelect, onEdit, onTextCommit, onEditEnd }: { object: PageObject; pageWidth: number; pageHeight: number; selected: boolean; matched: boolean; showContent: boolean; replacementPreview: boolean; editing: boolean; onSelect: () => void; onEdit: () => void; onTextCommit: (value: string) => void; onEditEnd: () => void }) {
+function SemanticObject({ object, pageWidth, pageHeight, selected, matched, showContent, replacementPreview, editing, onSelect, onEdit, onTextCommit, onEditEnd, onMove }: { object: PageObject; pageWidth: number; pageHeight: number; selected: boolean; matched: boolean; showContent: boolean; replacementPreview: boolean; editing: boolean; onSelect: () => void; onEdit: () => void; onTextCommit: (value: string) => void; onEditEnd: () => void; onMove: (bbox: Rect) => void }) {
   const [draftText, setDraftText] = useState(object.type === "text" ? object.text : "");
+  const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
+  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; startBbox: Rect; paper: DOMRect; offset: { x: number; y: number } } | null>(null);
+  const isDragging = dragOffset !== null;
   const style = {
-    left: `${(object.bbox.x / pageWidth) * 100}%`,
-    top: `${(object.bbox.y / pageHeight) * 100}%`,
+    left: `${((object.bbox.x + (dragOffset?.x ?? 0)) / pageWidth) * 100}%`,
+    top: `${((object.bbox.y + (dragOffset?.y ?? 0)) / pageHeight) * 100}%`,
     width: `${(object.bbox.width / pageWidth) * 100}%`,
     height: `${(object.bbox.height / pageHeight) * 100}%`,
   };
@@ -391,6 +416,36 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     setDraftText(object.text);
     onEdit();
   };
+  const startDragging = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (editing || (event.pointerType === "mouse" && event.button !== 0)) return;
+    const paper = event.currentTarget.parentElement?.getBoundingClientRect();
+    if (!paper) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startBbox: { ...object.bbox }, paper, offset: { x: 0, y: 0 } };
+  };
+  const updateDragging = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const nextX = clamp(drag.startBbox.x + ((event.clientX - drag.startX) / drag.paper.width) * pageWidth, 0, Math.max(0, pageWidth - drag.startBbox.width));
+    const nextY = clamp(drag.startBbox.y + ((event.clientY - drag.startY) / drag.paper.height) * pageHeight, 0, Math.max(0, pageHeight - drag.startBbox.height));
+    drag.offset = { x: nextX - drag.startBbox.x, y: nextY - drag.startBbox.y };
+    setDragOffset(drag.offset);
+  };
+  const finishDragging = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    const offset = drag.offset;
+    setDragOffset(null);
+    if (Math.abs(offset.x) < 0.5 && Math.abs(offset.y) < 0.5) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onMove({ ...drag.startBbox, x: drag.startBbox.x + offset.x, y: drag.startBbox.y + offset.y });
+  };
+  const cancelDragging = () => {
+    dragRef.current = null;
+    setDragOffset(null);
+  };
   const textStyle = {
     color: object.style.color,
     // PDF.js registers the embedded subset font under this exact family name
@@ -404,8 +459,8 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     letterSpacing: `${object.style.letterSpacing / pageWidth * 100}cqw`,
     textAlign: object.style.align,
   };
-  return <div className={`semantic-object text-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""} ${showContent ? "show-content" : ""} ${replacementPreview ? "is-replacement-preview" : ""}`} style={style} onClick={(event) => { event.stopPropagation(); onSelect(); }} onDoubleClick={startEditing} role="button" tabIndex={0} aria-label={`Text: ${objectLabel(object)}${replacementPreview ? " (edited preview)" : ""}`}>
-    {editing ? <textarea autoFocus wrap="off" value={draftText} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => setDraftText(event.target.value)} onBlur={finishEditing} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDraftText(object.text); onEditEnd(); } }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent ? object.text : ""}</span>}
+  return <div className={`semantic-object text-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""} ${showContent || isDragging ? "show-content" : ""} ${replacementPreview ? "is-replacement-preview" : ""} ${isDragging ? "is-dragging" : ""}`} style={style} onClick={(event) => { event.stopPropagation(); onSelect(); }} onDoubleClick={startEditing} onPointerDown={startDragging} onPointerMove={updateDragging} onPointerUp={finishDragging} onPointerCancel={cancelDragging} role="button" tabIndex={0} aria-label={`Text: ${objectLabel(object)}${replacementPreview ? " (edited preview)" : ""}`}>
+    {editing ? <textarea autoFocus wrap="off" value={draftText} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => setDraftText(event.target.value)} onBlur={finishEditing} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDraftText(object.text); onEditEnd(); } }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent || isDragging ? object.text : ""}</span>}
     {selected && !replacementPreview && <span className="object-source">{object.source === "native-pdf" ? "native" : object.source}</span>}
   </div>;
 }
@@ -413,8 +468,8 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
 function PageRenderSurface({ page, mutedTextId }: { page: DocumentPage; mutedTextId: string | null }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const replacementSignature = page.objects
-    .filter((object): object is TextBlock => object.type === "text" && object.source === "native-pdf" && (object.id === mutedTextId || object.originalText !== object.text))
-    .map((object) => `${object.id}:${object.text}:${object.style.fontFamily}:${object.style.fontSize}:${object.style.fontWeight}:${object.style.fontStyle}:${object.style.color}:${object.style.letterSpacing}:${object.direction}`)
+    .filter((object): object is TextBlock => object.type === "text" && object.source === "native-pdf" && (object.id === mutedTextId || needsNativeCanvasReplacement(object)))
+    .map((object) => `${object.id}:${object.text}:${object.bbox.x}:${object.bbox.y}:${object.bbox.width}:${object.bbox.height}:${object.style.fontFamily}:${object.style.fontSize}:${object.style.fontWeight}:${object.style.fontStyle}:${object.style.color}:${object.style.letterSpacing}:${object.direction}`)
     .join("|");
 
   useEffect(() => {
@@ -425,7 +480,7 @@ function PageRenderSurface({ page, mutedTextId }: { page: DocumentPage; mutedTex
     image.onload = async () => {
       if (disposed) return;
       const replacements = page.objects.filter(
-        (object): object is TextBlock => object.type === "text" && object.source === "native-pdf" && (object.id === mutedTextId || object.originalText !== object.text),
+        (object): object is TextBlock => object.type === "text" && object.source === "native-pdf" && (object.id === mutedTextId || needsNativeCanvasReplacement(object)),
       );
       await Promise.all(replacements.map((object) => document.fonts.load(canvasFont(object, 1), object.text).catch(() => [])));
       if (disposed) return;
@@ -437,7 +492,7 @@ function PageRenderSurface({ page, mutedTextId }: { page: DocumentPage; mutedTex
       const scaleX = canvas.width / page.width;
       const scaleY = canvas.height / page.height;
       replacements.forEach((object) => {
-        concealSourceText(context, object, scaleX, scaleY);
+        concealSourceText(context, object, scaleX, scaleY, object.originalBbox ?? object.bbox);
         if (object.id !== mutedTextId) paintNativeTextReplacement(context, object, scaleX, scaleY);
       });
     };
@@ -481,13 +536,13 @@ function drawCanvasText(context: CanvasRenderingContext2D, text: string, letterS
   }
 }
 
-function concealSourceText(context: CanvasRenderingContext2D, object: TextBlock, scaleX: number, scaleY: number): void {
+function concealSourceText(context: CanvasRenderingContext2D, object: TextBlock, scaleX: number, scaleY: number, sourceBbox: Rect): void {
   const paddingX = Math.max(2, scaleX * 1.5);
   const paddingY = Math.max(2, scaleY * 1.5);
-  const x = Math.max(0, object.bbox.x * scaleX - paddingX);
-  const y = Math.max(0, object.bbox.y * scaleY - paddingY);
-  const width = Math.min(context.canvas.width - x, object.bbox.width * scaleX + paddingX * 2);
-  const height = Math.min(context.canvas.height - y, object.bbox.height * scaleY + paddingY * 2);
+  const x = Math.max(0, sourceBbox.x * scaleX - paddingX);
+  const y = Math.max(0, sourceBbox.y * scaleY - paddingY);
+  const width = Math.min(context.canvas.width - x, sourceBbox.width * scaleX + paddingX * 2);
+  const height = Math.min(context.canvas.height - y, sourceBbox.height * scaleY + paddingY * 2);
   if (width <= 0 || height <= 0) return;
 
   // Derive the repair colour from the pixels immediately around the original

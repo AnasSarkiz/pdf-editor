@@ -45,16 +45,18 @@ function matrixFrom(transform: number[]): Matrix {
 function nativeTextToBlock(pageId: string, item: NativeTextItem, pageHeight: number, zIndex: number): TextBlock {
   const fontSize = Math.max(7, Math.hypot(item.transform[2] ?? 0, item.transform[3] ?? 0) || item.height || 12);
   const value = item.str.trim();
+  const bbox = {
+    x: item.transform[4] ?? 0,
+    y: Math.max(0, pageHeight - (item.transform[5] ?? 0) - fontSize),
+    width: Math.max(2, item.width || value.length * fontSize * 0.5),
+    height: fontSize * 1.16,
+  };
   return {
     id: stableId("native-text"),
     type: "text",
     pageId,
-    bbox: {
-      x: item.transform[4] ?? 0,
-      y: Math.max(0, pageHeight - (item.transform[5] ?? 0) - fontSize),
-      width: Math.max(2, item.width || value.length * fontSize * 0.5),
-      height: fontSize * 1.16,
-    },
+    bbox,
+    originalBbox: { ...bbox },
     rotation: Math.atan2(item.transform[1] ?? 0, item.transform[0] ?? 1) * (180 / Math.PI),
     transform: matrixFrom(item.transform),
     confidence: 1,

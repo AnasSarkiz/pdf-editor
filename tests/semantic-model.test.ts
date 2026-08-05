@@ -3,7 +3,7 @@ import test from "node:test";
 import { PDFDocument } from "pdf-lib";
 import { exportPdf, getExportReadiness } from "../app/lib/export-engine";
 import { createDemoDocument, detectTextMeta } from "../app/lib/document-model";
-import { isTextReplacementPreview, shouldRenderTextContent } from "../app/lib/editor-visibility";
+import { isTextReplacementPreview, needsNativeCanvasReplacement, shouldRenderTextContent } from "../app/lib/editor-visibility";
 import { detectScannedPage, inferReadingOrder } from "../app/lib/recognition";
 
 test("mixed Arabic and English metadata never reverses the source string", () => {
@@ -50,6 +50,21 @@ test("unchanged native text stays hidden over an untouched source preview", () =
   assert.ok(text && text.type === "text");
   assert.equal(shouldRenderTextContent(text, true, false), false);
   assert.equal(isTextReplacementPreview(text, true, false), false);
+});
+
+test("moving native text redraws it at the new location on the page canvas", () => {
+  const document = createDemoDocument();
+  const text = document.pages[0].objects.find((object) => object.type === "text");
+  assert.ok(text && text.type === "text");
+  const native = {
+    ...text,
+    source: "native-pdf" as const,
+    originalText: text.text,
+    originalBbox: { ...text.bbox },
+    bbox: { ...text.bbox, x: text.bbox.x + 24, y: text.bbox.y + 12 },
+  };
+  assert.equal(needsNativeCanvasReplacement(native), true);
+  assert.equal(isTextReplacementPreview(native, true, false), true);
 });
 
 test("the reconstruction proof of concept emits a valid PDF for an English semantic page", async () => {

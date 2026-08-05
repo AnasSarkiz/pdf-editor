@@ -11,6 +11,14 @@ export function shouldRenderTextContent(object: TextBlock, pageHasBackground: bo
   return false;
 }
 
+export function needsNativeCanvasReplacement(object: TextBlock): boolean {
+  if (object.source !== "native-pdf") return false;
+  if (object.originalText !== object.text) return true;
+  const original = object.originalBbox;
+  if (!original) return false;
+  return original.x !== object.bbox.x || original.y !== object.bbox.y || original.width !== object.bbox.width || original.height !== object.bbox.height;
+}
+
 export function isTextReplacementPreview(object: TextBlock, pageHasBackground: boolean, isInlineEditing: boolean): boolean {
-  return pageHasBackground && !isInlineEditing && object.source === "native-pdf" && object.originalText !== object.text;
+  return pageHasBackground && !isInlineEditing && needsNativeCanvasReplacement(object);
 }
