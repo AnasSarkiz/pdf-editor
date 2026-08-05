@@ -393,7 +393,10 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
   };
   const textStyle = {
     color: object.style.color,
-    fontFamily: getRenderableFontFamily(object),
+    // PDF.js registers the embedded subset font under this exact family name
+    // while it renders the source page. Reusing it is essential for matching
+    // the original glyph metrics, weight, and antialiasing in edited spans.
+    fontFamily: object.style.fontFamily,
     fontSize: `${(object.style.fontSize / pageWidth) * 100}cqw`,
     fontWeight: object.style.fontWeight,
     fontStyle: object.style.fontStyle,
@@ -405,16 +408,6 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     {editing ? <textarea autoFocus wrap="off" value={draftText} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => setDraftText(event.target.value)} onBlur={finishEditing} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDraftText(object.text); onEditEnd(); } }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent ? object.text : ""}</span>}
     {selected && !replacementPreview && <span className="object-source">{object.source === "native-pdf" ? "native" : object.source}</span>}
   </div>;
-}
-
-function getRenderableFontFamily(object: TextBlock): string {
-  // PDF.js exposes subset font identifiers (for example, "g_d0_f1") that a
-  // browser cannot resolve. Render those with stable platform fonts instead of
-  // falling back unpredictably, while retaining a user-selected font.
-  if (object.source !== "native-pdf" || !/^g_|^f\d+$/i.test(object.style.fontFamily)) return object.style.fontFamily;
-  return object.language === "ar" || object.language === "mixed"
-    ? '"Noto Naskh Arabic", "Noto Sans Arabic", Arial, sans-serif'
-    : 'Arial, "Helvetica Neue", Helvetica, sans-serif';
 }
 
 function PageRenderSurface({ page, mutedTextId }: { page: DocumentPage; mutedTextId: string | null }) {
