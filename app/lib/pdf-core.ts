@@ -133,9 +133,13 @@ export async function importPdf(file: File, onProgress?: (progress: PdfLoadProgr
       .filter((item): item is NativeTextItem => "str" in item && typeof item.str === "string" && item.str.trim().length > 0)
       .map((item, itemIndex) => nativeTextToBlock(pageId, item, viewport.height, itemIndex + 1));
     const operatorList = await sourcePage.getOperatorList().catch(() => null);
-    const imageCount = operatorList
-      ? operatorList.fn.filter((operation) => operation === pdfjs.OPS.paintImageXObject || operation === pdfjs.OPS.paintJpegXObject).length
-      : 0;
+    // PDF.js exposes its paint operations as `fnArray`. Keeping a guarded
+    // compatibility fallback makes this boundary resilient across PDF.js
+    // builds without treating a missing operator list as a parsing failure.
+    const operators = operatorList?.fnArray ?? operatorList?.fn ?? [];
+    const imageCount = operators.filter(
+      (operation) => operation === pdfjs.OPS.paintImageXObject || operation === pdfjs.OPS.paintJpegXObject,
+    ).length;
     const annotations = (await sourcePage.getAnnotations().catch(() => [])) as unknown as NativeAnnotation[];
     const fields = annotations
       .map((annotation, fieldIndex) => annotationToField(pageId, annotation, viewport.height, textItems.length + fieldIndex + 1))
