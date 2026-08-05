@@ -4,6 +4,7 @@ import { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, useEff
 import { downloadPdf, exportPdf, getExportReadiness } from "./lib/export-engine";
 import type { EditableDocument, EditOperation, PageObject, TextBlock, TextDirection, TextStyle } from "./lib/document-model";
 import { createDemoDocument, defaultTextStyle, detectTextMeta, identityMatrix, stableId } from "./lib/document-model";
+import { isTextReplacementPreview, shouldRenderTextContent } from "./lib/editor-visibility";
 import { importPdf, type PdfLoadProgress } from "./lib/pdf-core";
 
 type Tool = "select" | "text" | "table" | "image" | "shape" | "signature" | "form" | "hand";
@@ -330,12 +331,13 @@ export default function Home() {
                   object={object}
                   pageWidth={page.width}
                   pageHeight={page.height}
-                  showContent={!page.background || object.id === inlineEditing}
+                  showContent={object.type !== "text" || shouldRenderTextContent(object, Boolean(page.background), object.id === inlineEditing)}
+                  replacementPreview={object.type === "text" && isTextReplacementPreview(object, Boolean(page.background), object.id === inlineEditing)}
                   selected={selectedId === object.id}
                   matched={matchingIds.has(object.id)}
                   onSelect={() => { setSelectedId(object.id); setActiveTool("select"); }}
                   onEdit={() => object.type === "text" && setInlineEditing(object.id)}
-                  onTextChange={(value) => object.type === "text" && updateSelected({ text: value, ...detectTextMeta(value) }, "Edited text")}
+                  onTextCommit={(value) => object.type === "text" && updateSelected({ text: value, ...detectTextMeta(value) }, "Edited text")}
                   onEditEnd={() => setInlineEditing(null)}
                   editing={inlineEditing === object.id}
                 />
@@ -368,7 +370,8 @@ export default function Home() {
   );
 }
 
-function SemanticObject({ object, pageWidth, pageHeight, selected, matched, showContent, editing, onSelect, onEdit, onTextChange, onEditEnd }: { object: PageObject; pageWidth: number; pageHeight: number; selected: boolean; matched: boolean; showContent: boolean; editing: boolean; onSelect: () => void; onEdit: () => void; onTextChange: (value: string) => void; onEditEnd: () => void }) {
+function SemanticObject({ object, pageWidth, pageHeight, selected, matched, showContent, replacementPreview, editing, onSelect, onEdit, onTextCommit, onEditEnd }: { object: PageObject; pageWidth: number; pageHeight: number; selected: boolean; matched: boolean; showContent: boolean; replacementPreview: boolean; editing: boolean; onSelect: () => void; onEdit: () => void; onTextCommit: (value: string) => void; onEditEnd: () => void }) {
+  const [draftText, setDraftText] = useState(object.type === "text" ? object.text : "");
   const style = {
     left: `${(object.bbox.x / pageWidth) * 100}%`,
     top: `${(object.bbox.y / pageHeight) * 100}%`,
@@ -380,6 +383,14 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
   }
   if (object.type === "form-field") return <button className={`semantic-object field-object ${selected ? "is-selected" : ""}`} style={style} onClick={onSelect} aria-label={`Form field ${object.name}`} />;
   if (object.type !== "text") return <button className={`semantic-object ${selected ? "is-selected" : ""}`} style={style} onClick={onSelect} aria-label={object.type} />;
+  const finishEditing = () => {
+    if (draftText !== object.text) onTextCommit(draftText);
+    onEditEnd();
+  };
+  const startEditing = () => {
+    setDraftText(object.text);
+    onEdit();
+  };
   const textStyle = {
     color: object.style.color,
     fontFamily: object.style.fontFamily,
@@ -390,9 +401,9 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     letterSpacing: `${object.style.letterSpacing / pageWidth * 100}cqw`,
     textAlign: object.style.align,
   };
-  return <div className={`semantic-object text-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""} ${showContent ? "show-content" : ""}`} style={style} onClick={(event) => { event.stopPropagation(); onSelect(); }} onDoubleClick={onEdit} role="button" tabIndex={0} aria-label={`Text: ${objectLabel(object)}`}>
-    {editing ? <textarea autoFocus value={object.text} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => onTextChange(event.target.value)} onBlur={onEditEnd} onKeyDown={(event) => { if (event.key === "Escape") onEditEnd(); }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent ? object.text : ""}</span>}
-    {selected && <span className="object-source">{object.source === "native-pdf" ? "native" : object.source}</span>}
+  return <div className={`semantic-object text-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""} ${showContent ? "show-content" : ""} ${replacementPreview ? "is-replacement-preview" : ""}`} style={style} onClick={(event) => { event.stopPropagation(); onSelect(); }} onDoubleClick={startEditing} role="button" tabIndex={0} aria-label={`Text: ${objectLabel(object)}${replacementPreview ? " (edited preview)" : ""}`}>
+    {editing ? <textarea autoFocus value={draftText} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => setDraftText(event.target.value)} onBlur={finishEditing} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDraftText(object.text); onEditEnd(); } }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent ? object.text : ""}</span>}
+    {selected && <span className="object-source">{replacementPreview ? "edited preview" : object.source === "native-pdf" ? "native" : object.source}</span>}
   </div>;
 }
 

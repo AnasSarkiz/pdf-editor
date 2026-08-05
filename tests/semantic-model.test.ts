@@ -3,6 +3,7 @@ import test from "node:test";
 import { PDFDocument } from "pdf-lib";
 import { exportPdf, getExportReadiness } from "../app/lib/export-engine";
 import { createDemoDocument, detectTextMeta } from "../app/lib/document-model";
+import { isTextReplacementPreview, shouldRenderTextContent } from "../app/lib/editor-visibility";
 import { detectScannedPage, inferReadingOrder } from "../app/lib/recognition";
 
 test("mixed Arabic and English metadata never reverses the source string", () => {
@@ -32,6 +33,23 @@ test("export is explicitly held when a reconstruction needs Arabic shaping", () 
   const readiness = getExportReadiness(document);
   assert.equal(readiness.canExport, false);
   assert.match(readiness.messages.join(" "), /Arabic/);
+});
+
+test("an edited native text block remains visible after inline editing ends", () => {
+  const document = createDemoDocument();
+  const text = document.pages[0].objects.find((object) => object.type === "text");
+  assert.ok(text && text.type === "text");
+  text.text = "Updated semantic text";
+  assert.equal(shouldRenderTextContent(text, true, false), true);
+  assert.equal(isTextReplacementPreview(text, true, false), true);
+});
+
+test("unchanged native text stays hidden over an untouched source preview", () => {
+  const document = createDemoDocument();
+  const text = document.pages[0].objects.find((object) => object.type === "text");
+  assert.ok(text && text.type === "text");
+  assert.equal(shouldRenderTextContent(text, true, false), false);
+  assert.equal(isTextReplacementPreview(text, true, false), false);
 });
 
 test("the reconstruction proof of concept emits a valid PDF for an English semantic page", async () => {
