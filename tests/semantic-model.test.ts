@@ -4,6 +4,7 @@ import { PDFDocument } from "pdf-lib";
 import { exportPdf, getExportReadiness } from "../app/lib/export-engine";
 import { createDemoDocument, detectTextMeta } from "../app/lib/document-model";
 import { isTextReplacementPreview, needsNativeCanvasReplacement, shouldRenderTextContent } from "../app/lib/editor-visibility";
+import { tokensFromTesseractBlocks } from "../app/lib/local-ocr";
 import { detectScannedPage, inferReadingOrder } from "../app/lib/recognition";
 
 test("mixed Arabic and English metadata never reverses the source string", () => {
@@ -65,6 +66,22 @@ test("moving native text redraws it at the new location on the page canvas", () 
   };
   assert.equal(needsNativeCanvasReplacement(native), true);
   assert.equal(isTextReplacementPreview(native, true, false), true);
+});
+
+test("high-resolution OCR maps line bounds into page coordinates and preserves Arabic direction", () => {
+  const tokens = tokensFromTesseractBlocks([{
+    paragraphs: [{
+      is_ltr: false,
+      lines: [{ text: "اسم العميل 2026", confidence: 92, bbox: { x0: 300, y0: 600, x1: 900, y1: 720 } }],
+    }],
+  }], 2400, 3200, { width: 600, height: 800 });
+  assert.deepEqual(tokens, [{
+    text: "اسم العميل 2026",
+    polygon: [{ x: 75, y: 150 }, { x: 225, y: 150 }, { x: 225, y: 180 }, { x: 75, y: 180 }],
+    confidence: 0.92,
+    language: "ar",
+    direction: "rtl",
+  }]);
 });
 
 test("the reconstruction proof of concept emits a valid PDF for an English semantic page", async () => {

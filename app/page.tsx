@@ -216,7 +216,8 @@ export default function Home() {
       setHistory({ entries: [], cursor: 0 });
       setCurrentPageIndex(0);
       setSelectedId(null);
-      setNotice(`${file.name} opened locally. Native text is semantic; scanned regions are marked for OCR review.`);
+      const ocrTextCount = imported.document.pages.flatMap((entry) => entry.objects).filter((object) => object.type === "text" && object.source === "ocr").length;
+      setNotice(ocrTextCount ? `${file.name} opened locally. ${ocrTextCount} Arabic + English OCR blocks were recognized at 300 dpi.` : `${file.name} opened locally. Native text is semantic; scanned regions are marked for OCR review.`);
     } catch (error) {
       setNotice(error instanceof Error ? `Unable to open PDF: ${error.message}` : "Unable to open this PDF.");
     } finally {
@@ -272,6 +273,7 @@ export default function Home() {
   });
 
   if (!page) return null;
+  const ocrTextCount = page.objects.filter((object) => object.type === "text" && object.source === "ocr").length;
 
   return (
     <main className="studio-shell" onKeyDown={handlePageKeyDown}>
@@ -335,7 +337,7 @@ export default function Home() {
         <section className="canvas-zone" aria-label="Editable PDF canvas">
           <div className="canvas-toolbar">
             <div className="crumb">Page {page.number} <span>/</span> {documentModel.metadata.pageCount}</div>
-            <div className={`analysis-chip ${page.analysisStatus === "needs-review" ? "needs-review" : ""}`}><span /> {page.sourceKind === "scan" ? "OCR review" : page.sourceKind === "hybrid" ? "Hybrid analysis" : "Native extraction"}</div>
+            <div className={`analysis-chip ${page.analysisStatus === "needs-review" ? "needs-review" : ""}`}><span /> {page.sourceKind === "scan" ? ocrTextCount ? `Local OCR · 300 dpi · ${ocrTextCount} blocks` : "OCR review" : page.sourceKind === "hybrid" ? "Hybrid analysis" : "Native extraction"}</div>
           </div>
           <div className="paper-wrap" style={{ width: `${zoom}%` }}>
             <div
@@ -605,7 +607,8 @@ function LayersPanel({ page, selectedId, onSelect }: { page: EditableDocument["p
 
 function ReviewPanel({ page, readiness }: { page: EditableDocument["pages"][number]; readiness: ReturnType<typeof getExportReadiness> }) {
   const uncertain = page.objects.filter((object) => object.confidence < 0.9);
-  return <div className="review-panel"><div className="panel-heading"><span className="eyebrow">Quality gate</span><h2>Recognition review</h2></div><div className="review-hero"><span>{page.sourceKind === "native" ? "Native source" : page.sourceKind === "hybrid" ? "Hybrid source" : "Scanned source"}</span><strong>{page.nativeTextCount} text objects</strong><small>{page.imageCount} image operations detected</small></div><div className="review-list">{uncertain.length ? uncertain.map((object) => <div key={object.id}><span className="warning-dot" /><p><strong>{objectLabel(object)}</strong><small>{formatConfidence(object.confidence)} confidence · {object.source}</small></p><button>Review</button></div>) : <div className="review-clear"><span>✓</span><p>All current objects meet the review threshold.</p></div>}</div><div className={`export-readiness ${readiness.canExport ? "ready" : "held"}`}><span>{readiness.canExport ? "Export ready" : "Export held"}</span>{readiness.messages.map((message) => <p key={message}>{message}</p>)}</div></div>;
+  const ocrTextCount = page.objects.filter((object) => object.type === "text" && object.source === "ocr").length;
+  return <div className="review-panel"><div className="panel-heading"><span className="eyebrow">Quality gate</span><h2>Recognition review</h2></div><div className="review-hero"><span>{page.sourceKind === "native" ? "Native source" : page.sourceKind === "hybrid" ? "Hybrid source" : "Scanned source"}</span><strong>{page.nativeTextCount + ocrTextCount} text objects</strong><small>{ocrTextCount ? `Local Arabic + English OCR · 300 dpi · ${ocrTextCount} blocks` : `${page.imageCount} image operations detected`}</small></div><div className="review-list">{uncertain.length ? uncertain.map((object) => <div key={object.id}><span className="warning-dot" /><p><strong>{objectLabel(object)}</strong><small>{formatConfidence(object.confidence)} confidence · {object.source}</small></p><button>Review</button></div>) : <div className="review-clear"><span>✓</span><p>All current objects meet the review threshold.</p></div>}</div><div className={`export-readiness ${readiness.canExport ? "ready" : "held"}`}><span>{readiness.canExport ? "Export ready" : "Export held"}</span>{readiness.messages.map((message) => <p key={message}>{message}</p>)}</div></div>;
 }
 
 function SearchPanel({ search, setSearch, document, onSelect }: { search: string; setSearch: (value: string) => void; document: EditableDocument; onSelect: (id: string) => void }) {

@@ -8,7 +8,7 @@ Naskh Studio is a web-based PDF editor proof of concept built around a normalize
 - Stable semantic objects carrying bounds, transformation, source, confidence, language, and direction metadata.
 - Unicode-aware Arabic/English editing surface, inline text editing, selection, add/delete/duplicate text, operation-based undo/redo, semantic search, and confidence review.
 - Valid PDF export for safe paths, with explicit holds where an export would otherwise degrade fidelity.
-- A deliberately separate OCR/layout/table provider boundary that fails closed until the user has selected a local or server-assisted provider.
+- Local Arabic + English OCR for scanned pages, rendered at 300 dpi and kept in the browser; recognition blocks carry confidence for review.
 
 ## Guardrail
 
@@ -30,4 +30,4 @@ bun test
 bun run build
 ```
 
-The app has no automatic OCR upload path. Any future server-assisted analysis must make consent, retention, and encryption choices explicit.
+Scanned pages use a browser-local Tesseract worker with Arabic and English high-accuracy models. The first scanned page can take longer while the language models download; page imagery is never uploaded. Any future server-assisted analysis must make consent, retention, and encryption choices explicit.

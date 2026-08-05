@@ -10,9 +10,10 @@ The browser implementation now validates the highest-risk client path:
 2. Parse a native PDF with PDF.js in a worker.
 3. Extract native text items, placement matrices, font identifiers, annotations, and image paint operations.
 4. Normalize those into stable semantic objects in one top-left point coordinate system.
-5. Render each page separately from its semantic data.
-6. Support selection, inline text editing, a property inspector, add-text, delete, duplicate, Unicode-aware search, and operation history.
-7. Export a valid PDF without rasterizing untouched input pages. Export is held whenever this browser build cannot preserve fidelity safely.
+5. Render each page separately from its semantic data at a high-quality preview scale.
+6. For image-only scanned pages, render a separate 300 dpi canvas and recognize Arabic + English text locally in a browser worker.
+7. Support selection, inline text editing, a property inspector, add-text, delete, duplicate, Unicode-aware search, and operation history.
+8. Export a valid PDF without rasterizing untouched input pages. Export is held whenever this browser build cannot preserve fidelity safely.
 
 This is deliberately not a claim that arbitrary native PDF content streams can already be rewritten losslessly in the browser. A modified native text block is held for the reconstruction worker rather than covered with a white rectangle or silently flattened.
 
@@ -44,6 +45,7 @@ flowchart LR
 | `app/lib/document-model.ts` | Strict IR, text metadata, stable IDs, demo fixture | Yes |
 | `app/lib/pdf-core.ts` | PDF.js loading, native text/form/image extraction, viewport rendering | Yes |
 | `app/lib/recognition.ts` | OCR/layout/table provider interfaces, scan classification, reading order | Yes |
+| `app/lib/local-ocr.ts` | Browser-local 300 dpi Arabic + English OCR worker and geometry normalization | Yes |
 | `app/lib/export-engine.ts` | Export strategy selection, valid PDF patch/reconstruction proof of concept | Yes |
 | `app/page.tsx` | Interaction composition only: selection, tool state, history controls | No |
 
@@ -69,7 +71,7 @@ Exporting newly-created or reconstructed Arabic needs two additional worker depe
 
 ## Security posture
 
-The browser path validates `%PDF-` before parsing, limits this proof of concept to 100 MB, disables PDF.js JavaScript evaluation, and does not send data to an OCR service by default. The `UnconfiguredOcrProvider` fails closed; a server-assisted provider must make upload consent and retention policy explicit.
+The browser path validates `%PDF-` before parsing, limits this proof of concept to 100 MB, disables PDF.js JavaScript evaluation, and does not send page imagery to an OCR service. Image-only scans are recognized in a local Web Worker using downloaded Arabic and English model files. A future server-assisted provider must make upload consent and retention policy explicit.
 
 ## Production worker roadmap
 

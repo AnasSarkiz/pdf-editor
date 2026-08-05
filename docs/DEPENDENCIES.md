@@ -7,7 +7,7 @@ The current proof of concept uses two runtime libraries. The next-stage candidat
 | PDF.js (`pdfjs-dist`) | Included | Apache-2.0 | Mature browser parser/renderer; exposes text content, annotations, operators, and page viewports | Viewer extraction is not a general PDF content-stream editor |
 | pdf-lib | Included | MIT | Creates valid PDFs, embeds/loads pages, adds vector/text content, and runs in browser or worker | Does not itself shape complex scripts or safely rewrite arbitrary existing text operators |
 | HarfBuzz WASM | Candidate, required for reconstruction | MIT | Correct Arabic joining, glyph selection, and positioning | Needs a font pipeline and glyph-position PDF writer |
-| Tesseract.js + Arabic/English trained data | Candidate for private local OCR | Apache-2.0 | Browser-local OCR option; avoids automatic document upload | Large language data and slower first-page processing |
+| Tesseract.js + Arabic/English trained data | Included for private local OCR | Apache-2.0 | 300 dpi browser-local OCR for image-only scans; avoids automatic document upload | Larger first-run model download and slower first scanned page |
 | Server OCR provider adapter | Candidate | Provider-specific | Higher accuracy for low-resolution forms and tables | Requires explicit consent, encryption, retention, and region-aware policies |
 | OpenType parser (`fontkit` or equivalent) | Candidate | MIT / BSD variants depending on choice | Font inspection/subsetting and glyph metrics | Verify exact transitive licence before bundling |
 | Table recognition model | Provider boundary only | Model-specific | Supports borders, borderless tables, spans, and confidence | Needs a benchmark set before a production selection |

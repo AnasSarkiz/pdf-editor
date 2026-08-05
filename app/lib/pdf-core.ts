@@ -1,8 +1,17 @@
 import type { EditableDocument, DocumentPage, FormFieldObject, ImageObject, Matrix, TextBlock } from "./document-model";
 import { defaultTextStyle, detectTextMeta, identityMatrix, stableId } from "./document-model";
-import { detectScannedPage, inferReadingOrder } from "./recognition";
+import { createHighResolutionOcrSession, type LocalOcrSession } from "./local-ocr";
+import { detectScannedPage, inferReadingOrder, textFromOcrToken } from "./recognition";
 
 type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
+
+type RenderablePdfPage = {
+  getViewport: (value: { scale: number }) => { width: number; height: number };
+  render: (input: { canvas: HTMLCanvasElement; canvasContext: CanvasRenderingContext2D; viewport: { width: number; height: number } }) => { promise: Promise<void> };
+};
+
+const PREVIEW_RENDER_SCALE = 2;
+const OCR_RENDER_SCALE = 300 / 72;
 
 interface NativeTextItem {
   str: string;
@@ -100,21 +109,26 @@ function annotationToField(pageId: string, annotation: NativeAnnotation, pageHei
   };
 }
 
-async function renderPage(page: { getViewport: (value: { scale: number }) => { width: number; height: number }; render: (input: { canvas: HTMLCanvasElement; canvasContext: CanvasRenderingContext2D; viewport: { width: number; height: number } }) => { promise: Promise<void> } }): Promise<string> {
-  const viewport = page.getViewport({ scale: 1.5 });
+async function renderPageCanvas(page: RenderablePdfPage, scale: number): Promise<HTMLCanvasElement> {
+  const viewport = page.getViewport({ scale });
   const canvas = document.createElement("canvas");
   canvas.width = Math.ceil(viewport.width);
   canvas.height = Math.ceil(viewport.height);
   const context = canvas.getContext("2d", { alpha: false });
   if (!context) throw new Error("Canvas rendering is unavailable in this browser.");
   await page.render({ canvas, canvasContext: context, viewport }).promise;
+  return canvas;
+}
+
+async function renderPage(page: RenderablePdfPage): Promise<string> {
+  const canvas = await renderPageCanvas(page, PREVIEW_RENDER_SCALE);
   // Keep the original page and committed canvas text at the same quality.
   // JPEG artifacts made replacement text look different from the source page.
   return canvas.toDataURL("image/png");
 }
 
 export interface PdfLoadProgress {
-  phase: "opening" | "extracting" | "rendering" | "ready";
+  phase: "opening" | "extracting" | "recognizing" | "rendering" | "ready";
   completed: number;
   total: number;
 }
@@ -127,7 +141,9 @@ export async function importPdf(file: File, onProgress?: (progress: PdfLoadProgr
   const pdf = await loadingTask.promise;
   const metadata = await pdf.getMetadata().catch(() => null);
   const pages: DocumentPage[] = [];
+  let localOcr: LocalOcrSession | null = null;
 
+  try {
   for (let index = 1; index <= pdf.numPages; index += 1) {
     onProgress?.({ phase: "extracting", completed: index - 1, total: pdf.numPages });
     const sourcePage = await pdf.getPage(index);
@@ -149,7 +165,23 @@ export async function importPdf(file: File, onProgress?: (progress: PdfLoadProgr
     const fields = annotations
       .map((annotation, fieldIndex) => annotationToField(pageId, annotation, viewport.height, textItems.length + fieldIndex + 1))
       .filter((field): field is FormFieldObject => field !== null);
-    const objects = inferReadingOrder(textItems);
+    const sourceKind = detectScannedPage(textItems.length, imageCount);
+    let ocrBlocks: TextBlock[] = [];
+    if (sourceKind === "scan") {
+      onProgress?.({ phase: "recognizing", completed: index - 1, total: pdf.numPages });
+      try {
+        localOcr ??= await createHighResolutionOcrSession();
+        const ocrCanvas = await renderPageCanvas(sourcePage, OCR_RENDER_SCALE);
+        const tokens = await localOcr.recognize(ocrCanvas, viewport);
+        ocrBlocks = tokens.map((token) => textFromOcrToken(pageId, token));
+      } catch {
+        // A local model failure must not prevent a document from opening. The
+        // empty scan remains explicitly marked for manual OCR review.
+        ocrBlocks = [];
+      }
+      onProgress?.({ phase: "recognizing", completed: index, total: pdf.numPages });
+    }
+    const objects = inferReadingOrder([...textItems, ...ocrBlocks]);
 
     onProgress?.({ phase: "rendering", completed: index - 1, total: pdf.numPages });
     const background = await renderPage(sourcePage);
@@ -160,11 +192,11 @@ export async function importPdf(file: File, onProgress?: (progress: PdfLoadProgr
       height: viewport.height,
       rotation: sourcePage.rotate,
       background,
-      sourceKind: detectScannedPage(textItems.length, imageCount),
+      sourceKind,
       objects: [...objects, ...fields],
       nativeTextCount: textItems.length,
       imageCount,
-      analysisStatus: textItems.length ? "ready" : "needs-review",
+      analysisStatus: textItems.length || ocrBlocks.length ? "ready" : "needs-review",
     });
     onProgress?.({ phase: "rendering", completed: index, total: pdf.numPages });
   }
@@ -187,6 +219,9 @@ export async function importPdf(file: File, onProgress?: (progress: PdfLoadProgr
       operations: [],
     },
   };
+  } finally {
+    await localOcr?.terminate();
+  }
 }
 
 /** Native image objects stay opaque until an extraction provider resolves their original stream. */
