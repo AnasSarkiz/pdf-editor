@@ -68,6 +68,7 @@ function nativeTextToBlock(pageId: string, item: NativeTextItem, pageHeight: num
       ...defaultTextStyle,
       fontFamily: item.fontName || defaultTextStyle.fontFamily,
       fontSize,
+      lineHeight: 1,
     },
     overflow: "warn",
     editable: true,

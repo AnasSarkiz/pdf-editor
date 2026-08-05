@@ -2,7 +2,7 @@
 
 import { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { downloadPdf, exportPdf, getExportReadiness } from "./lib/export-engine";
-import type { EditableDocument, EditOperation, PageObject, TextBlock, TextDirection, TextStyle } from "./lib/document-model";
+import type { DocumentPage, EditableDocument, EditOperation, PageObject, TextBlock, TextDirection, TextStyle } from "./lib/document-model";
 import { createDemoDocument, defaultTextStyle, detectTextMeta, identityMatrix, stableId } from "./lib/document-model";
 import { isTextReplacementPreview, shouldRenderTextContent } from "./lib/editor-visibility";
 import { importPdf, type PdfLoadProgress } from "./lib/pdf-core";
@@ -321,9 +321,9 @@ export default function Home() {
               className={`paper ${page.background ? "has-background" : ""}`}
               style={{
                 aspectRatio: `${page.width} / ${page.height}`,
-                ...(page.background ? { backgroundImage: `url(${page.background})` } : {}),
               } as CSSProperties}
             >
+              <PageRenderSurface page={page} mutedTextId={inlineEditing} />
               {!page.background && <div className="demo-folio">NASKH / 01</div>}
               {page.objects.map((object) => (
                 <SemanticObject
@@ -342,7 +342,7 @@ export default function Home() {
                   editing={inlineEditing === object.id}
                 />
               ))}
-              {selected && <SelectionRuler object={selected} pageWidth={page.width} pageHeight={page.height} />}
+              {selected && selected.type !== "text" && <SelectionRuler object={selected} pageWidth={page.width} pageHeight={page.height} />}
             </div>
           </div>
         </section>
@@ -393,7 +393,7 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
   };
   const textStyle = {
     color: object.style.color,
-    fontFamily: object.style.fontFamily,
+    fontFamily: getRenderableFontFamily(object),
     fontSize: `${(object.style.fontSize / pageWidth) * 100}cqw`,
     fontWeight: object.style.fontWeight,
     fontStyle: object.style.fontStyle,
@@ -402,9 +402,94 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     textAlign: object.style.align,
   };
   return <div className={`semantic-object text-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""} ${showContent ? "show-content" : ""} ${replacementPreview ? "is-replacement-preview" : ""}`} style={style} onClick={(event) => { event.stopPropagation(); onSelect(); }} onDoubleClick={startEditing} role="button" tabIndex={0} aria-label={`Text: ${objectLabel(object)}${replacementPreview ? " (edited preview)" : ""}`}>
-    {editing ? <textarea autoFocus value={draftText} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => setDraftText(event.target.value)} onBlur={finishEditing} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDraftText(object.text); onEditEnd(); } }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent ? object.text : ""}</span>}
-    {selected && <span className="object-source">{replacementPreview ? "edited preview" : object.source === "native-pdf" ? "native" : object.source}</span>}
+    {editing ? <textarea autoFocus wrap="off" value={draftText} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => setDraftText(event.target.value)} onBlur={finishEditing} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDraftText(object.text); onEditEnd(); } }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent ? object.text : ""}</span>}
+    {selected && !replacementPreview && <span className="object-source">{object.source === "native-pdf" ? "native" : object.source}</span>}
   </div>;
+}
+
+function getRenderableFontFamily(object: TextBlock): string {
+  // PDF.js exposes subset font identifiers (for example, "g_d0_f1") that a
+  // browser cannot resolve. Render those with stable platform fonts instead of
+  // falling back unpredictably, while retaining a user-selected font.
+  if (object.source !== "native-pdf" || !/^g_|^f\d+$/i.test(object.style.fontFamily)) return object.style.fontFamily;
+  return object.language === "ar" || object.language === "mixed"
+    ? '"Noto Naskh Arabic", "Noto Sans Arabic", Arial, sans-serif'
+    : 'Arial, "Helvetica Neue", Helvetica, sans-serif';
+}
+
+function PageRenderSurface({ page, mutedTextId }: { page: DocumentPage; mutedTextId: string | null }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const maskSignature = page.objects
+    .filter((object): object is TextBlock => object.type === "text" && object.source === "native-pdf" && (object.id === mutedTextId || object.originalText !== object.text))
+    .map((object) => `${object.id}:${object.text}`)
+    .join("|");
+
+  useEffect(() => {
+    if (!page.background || !canvasRef.current) return;
+    let disposed = false;
+    const canvas = canvasRef.current;
+    const image = new Image();
+    image.onload = () => {
+      if (disposed) return;
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) return;
+      context.drawImage(image, 0, 0);
+      const scaleX = canvas.width / page.width;
+      const scaleY = canvas.height / page.height;
+      page.objects
+        .filter((object): object is TextBlock => object.type === "text" && object.source === "native-pdf" && (object.id === mutedTextId || object.originalText !== object.text))
+        .forEach((object) => concealSourceText(context, object, scaleX, scaleY));
+    };
+    image.src = page.background;
+    return () => { disposed = true; };
+  }, [page, mutedTextId, maskSignature]);
+
+  if (!page.background) return null;
+  return <canvas ref={canvasRef} className="page-render-surface" aria-hidden="true" />;
+}
+
+function concealSourceText(context: CanvasRenderingContext2D, object: TextBlock, scaleX: number, scaleY: number): void {
+  const paddingX = Math.max(2, scaleX * 1.5);
+  const paddingY = Math.max(2, scaleY * 1.5);
+  const x = Math.max(0, object.bbox.x * scaleX - paddingX);
+  const y = Math.max(0, object.bbox.y * scaleY - paddingY);
+  const width = Math.min(context.canvas.width - x, object.bbox.width * scaleX + paddingX * 2);
+  const height = Math.min(context.canvas.height - y, object.bbox.height * scaleY + paddingY * 2);
+  if (width <= 0 || height <= 0) return;
+
+  // Derive the repair colour from the pixels immediately around the original
+  // glyphs. This keeps the page preview continuous without putting a CSS box
+  // behind edited text.
+  const samples = [
+    [x, Math.max(0, y - paddingY * 2), width, paddingY],
+    [x, Math.min(context.canvas.height - paddingY, y + height + paddingY), width, paddingY],
+    [Math.max(0, x - paddingX * 2), y, paddingX, height],
+    [Math.min(context.canvas.width - paddingX, x + width + paddingX), y, paddingX, height],
+  ] as const;
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  let count = 0;
+  for (const [sampleX, sampleY, sampleWidth, sampleHeight] of samples) {
+    const safeWidth = Math.max(1, Math.min(context.canvas.width - Math.floor(sampleX), Math.ceil(sampleWidth)));
+    const safeHeight = Math.max(1, Math.min(context.canvas.height - Math.floor(sampleY), Math.ceil(sampleHeight)));
+    const pixels = context.getImageData(Math.floor(sampleX), Math.floor(sampleY), safeWidth, safeHeight).data;
+    for (let index = 0; index < pixels.length; index += 4) {
+      // Ignore dark neighbouring glyphs and favour the actual page surface.
+      if (pixels[index] + pixels[index + 1] + pixels[index + 2] < 150) continue;
+      red += pixels[index];
+      green += pixels[index + 1];
+      blue += pixels[index + 2];
+      count += 1;
+    }
+  }
+  if (!count) return;
+  context.save();
+  context.fillStyle = `rgb(${Math.round(red / count)}, ${Math.round(green / count)}, ${Math.round(blue / count)})`;
+  context.fillRect(x, y, width, height);
+  context.restore();
 }
 
 function SelectionRuler({ object, pageWidth, pageHeight }: { object: PageObject; pageWidth: number; pageHeight: number }) {
