@@ -57,6 +57,10 @@ export interface TextBlock extends SemanticObjectBase {
   text: string;
   /** Immutable source placement used to remove moved native text from the page preview. */
   originalBbox?: Rect;
+  /** Immutable source formatting used to detect native text changes safely. */
+  originalStyle?: TextStyle;
+  /** Source rotation in screen-space degrees for reconstruction decisions. */
+  originalRotation?: number;
   style: TextStyle;
   originalText?: string;
   overflow: "shrink" | "expand" | "reflow" | "allow" | "warn";
@@ -231,12 +235,16 @@ export function createDemoDocument(): EditableDocument {
       })),
     ),
   };
-  const text = (value: string, bbox: Rect, style: Partial<TextStyle> = {}, source: ObjectSource = "native-pdf"): TextBlock => ({
+  const text = (value: string, bbox: Rect, style: Partial<TextStyle> = {}, source: ObjectSource = "native-pdf"): TextBlock => {
+    const resolvedStyle = { ...defaultTextStyle, ...style };
+    return {
     id: stableId("text"),
     type: "text",
     pageId,
     bbox,
+    originalBbox: { ...bbox },
     rotation: 0,
+    originalRotation: 0,
     transform: identityMatrix,
     confidence: 0.99,
     source,
@@ -245,10 +253,12 @@ export function createDemoDocument(): EditableDocument {
     ...detectTextMeta(value),
     text: value,
     originalText: value,
-    style: { ...defaultTextStyle, ...style },
+    style: resolvedStyle,
+    originalStyle: { ...resolvedStyle },
     overflow: "warn",
     editable: true,
-  });
+    };
+  };
 
   return {
     id: stableId("document"),

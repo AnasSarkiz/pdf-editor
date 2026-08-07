@@ -60,13 +60,21 @@ function nativeTextToBlock(pageId: string, item: NativeTextItem, pageHeight: num
     width: Math.max(2, item.width || value.length * fontSize * 0.5),
     height: fontSize * 1.16,
   };
+  const style = {
+    ...defaultTextStyle,
+    fontFamily: item.fontName || defaultTextStyle.fontFamily,
+    fontSize,
+    lineHeight: 1,
+  };
+  const rotation = Math.atan2(item.transform[1] ?? 0, item.transform[0] ?? 1) * (180 / Math.PI);
   return {
     id: stableId("native-text"),
     type: "text",
     pageId,
     bbox,
     originalBbox: { ...bbox },
-    rotation: Math.atan2(item.transform[1] ?? 0, item.transform[0] ?? 1) * (180 / Math.PI),
+    rotation,
+    originalRotation: rotation,
     transform: matrixFrom(item.transform),
     confidence: 1,
     source: "native-pdf",
@@ -75,12 +83,8 @@ function nativeTextToBlock(pageId: string, item: NativeTextItem, pageHeight: num
     ...detectTextMeta(value),
     text: value,
     originalText: value,
-    style: {
-      ...defaultTextStyle,
-      fontFamily: item.fontName || defaultTextStyle.fontFamily,
-      fontSize,
-      lineHeight: 1,
-    },
+    style,
+    originalStyle: { ...style },
     overflow: "warn",
     editable: true,
   };

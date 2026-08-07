@@ -418,7 +418,7 @@ export default function Home() {
           <nav className="inspector-tabs" aria-label="Inspector sections">
             {(["properties", "layers", "review", "search"] as Panel[]).map((panel) => <button key={panel} className={activePanel === panel ? "is-active" : ""} onClick={() => setActivePanel(panel)}>{panel}</button>)}
           </nav>
-          {activePanel === "properties" && <PropertiesPanel selected={selected} onTextChange={(text) => selected?.type === "text" && updateSelected({ text, ...detectTextMeta(text), ...(selected.source === "user" ? { bbox: fitTextBounds(text, selected.bbox, page.width, page.height, selected.style, selected.bbox) } : {}) }, "Edited text")} onStyleChange={(style) => selected?.type === "text" && updateSelected({ style: { ...selected.style, ...style } }, "Changed text style")} onDirectionChange={(direction) => selected?.type === "text" && updateSelected({ direction }, "Changed paragraph direction")} onDelete={deleteSelected} onDuplicate={duplicateSelected} />}
+          {activePanel === "properties" && <PropertiesPanel selected={selected} onTextChange={(text) => selected?.type === "text" && updateSelected({ text, ...detectTextMeta(text), ...(selected.source === "user" ? { bbox: fitTextBounds(text, selected.bbox, page.width, page.height, selected.style, selected.bbox) } : {}) }, "Edited text")} onStyleChange={(style) => selected?.type === "text" && updateSelected({ style: { ...selected.style, ...style } }, "Changed text style")} onRotationChange={(rotation) => selected?.type === "text" && updateSelected({ rotation: clamp(rotation, -180, 180) }, "Rotated text")} onDirectionChange={(direction) => selected?.type === "text" && updateSelected({ direction }, "Changed paragraph direction")} onDelete={deleteSelected} onDuplicate={duplicateSelected} />}
           {activePanel === "layers" && <LayersPanel page={page} selectedId={selectedId} onSelect={setSelectedId} />}
           {activePanel === "review" && <ReviewPanel page={page} readiness={exportReadiness} />}
           {activePanel === "search" && <SearchPanel search={search} setSearch={setSearch} document={documentModel} onSelect={(id) => { setSelectedId(id); const located = findObject(documentModel, id); if (located) setCurrentPageIndex(located.pageIndex); }} />}
@@ -451,6 +451,8 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     top: `${((displayBbox.y + (dragOffset?.y ?? 0)) / pageHeight) * 100}%`,
     width: `${(displayBbox.width / pageWidth) * 100}%`,
     height: `${(displayBbox.height / pageHeight) * 100}%`,
+    transform: object.type === "text" && object.rotation ? `rotate(${object.rotation}deg)` : undefined,
+    transformOrigin: "top left",
   };
   if (object.type === "table") {
     return <button className={`semantic-object table-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""}`} style={style} onClick={onSelect} aria-label="Recognized table"><span className="table-object-label">{object.rows} × {object.columns} table · {formatConfidence(object.confidence)}</span></button>;
@@ -556,7 +558,7 @@ function PageRenderSurface({ page, mutedTextId }: { page: DocumentPage; mutedTex
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const replacementSignature = page.objects
     .filter((object): object is TextBlock => object.type === "text" && object.source === "native-pdf" && (object.id === mutedTextId || needsNativeCanvasReplacement(object)))
-    .map((object) => `${object.id}:${object.text}:${object.bbox.x}:${object.bbox.y}:${object.bbox.width}:${object.bbox.height}:${object.style.fontFamily}:${object.style.fontSize}:${object.style.fontWeight}:${object.style.fontStyle}:${object.style.color}:${object.style.letterSpacing}:${object.direction}`)
+    .map((object) => `${object.id}:${object.text}:${object.bbox.x}:${object.bbox.y}:${object.bbox.width}:${object.bbox.height}:${object.rotation}:${object.style.fontFamily}:${object.style.fontSize}:${object.style.fontWeight}:${object.style.fontStyle}:${object.style.color}:${object.style.lineHeight}:${object.style.letterSpacing}:${object.style.align}:${object.direction}`)
     .join("|");
 
   useEffect(() => {
@@ -601,26 +603,32 @@ function paintNativeTextReplacement(context: CanvasRenderingContext2D, object: T
   const textScale = (horizontalScale / verticalScale) * (scaleX / scaleY);
   context.save();
   context.translate(object.bbox.x * scaleX, (object.bbox.y + object.style.fontSize) * scaleY);
+  if (object.rotation) context.rotate((object.rotation * Math.PI) / 180);
   context.scale(textScale, 1);
   context.font = canvasFont(object, scaleY);
   context.fillStyle = object.style.color;
   context.textBaseline = "alphabetic";
-  context.textAlign = object.style.align === "right" ? "right" : object.style.align === "center" ? "center" : "left";
+  context.textAlign = "left";
   context.direction = object.direction === "auto" ? "inherit" : object.direction;
-  drawCanvasText(context, object.text, object.style.letterSpacing * scaleY);
+  drawCanvasText(context, object.text, object.style.letterSpacing * scaleY, object.style.fontSize * object.style.lineHeight * scaleY, (object.bbox.width * scaleX) / textScale, object.style.align);
   context.restore();
 }
 
-function drawCanvasText(context: CanvasRenderingContext2D, text: string, letterSpacing: number): void {
-  if (!letterSpacing) {
-    context.fillText(text, 0, 0);
-    return;
-  }
-  let advance = 0;
-  for (const glyph of Array.from(text)) {
-    context.fillText(glyph, advance, 0);
-    advance += context.measureText(glyph).width + letterSpacing;
-  }
+function drawCanvasText(context: CanvasRenderingContext2D, text: string, letterSpacing: number, lineHeight: number, availableWidth: number, align: TextStyle["align"]): void {
+  text.split(/\r?\n/).forEach((line, lineIndex) => {
+    const y = lineIndex * lineHeight;
+    const measuredWidth = context.measureText(line).width + Math.max(0, line.length - 1) * letterSpacing;
+    const x = align === "right" ? availableWidth - measuredWidth : align === "center" ? (availableWidth - measuredWidth) / 2 : 0;
+    if (!letterSpacing) {
+      context.fillText(line, x, y);
+      return;
+    }
+    let advance = x;
+    for (const glyph of Array.from(line)) {
+      context.fillText(glyph, advance, y);
+      advance += context.measureText(glyph).width + letterSpacing;
+    }
+  });
 }
 
 function concealSourceText(context: CanvasRenderingContext2D, object: TextBlock, scaleX: number, scaleY: number, sourceBbox: Rect): void {
@@ -669,17 +677,25 @@ function SelectionRuler({ object, pageWidth, pageHeight }: { object: PageObject;
   return <div className="selection-ruler" style={{ left: `${(object.bbox.x / pageWidth) * 100}%`, top: `${(object.bbox.y / pageHeight) * 100}%` }}><span>{Math.round(object.bbox.x)}, {Math.round(object.bbox.y)}</span></div>;
 }
 
-function PropertiesPanel({ selected, onTextChange, onStyleChange, onDirectionChange, onDelete, onDuplicate }: { selected: PageObject | null; onTextChange: (value: string) => void; onStyleChange: (value: Partial<TextStyle>) => void; onDirectionChange: (direction: TextDirection) => void; onDelete: () => void; onDuplicate: () => void }) {
+function PropertiesPanel({ selected, onTextChange, onStyleChange, onRotationChange, onDirectionChange, onDelete, onDuplicate }: { selected: PageObject | null; onTextChange: (value: string) => void; onStyleChange: (value: Partial<TextStyle>) => void; onRotationChange: (value: number) => void; onDirectionChange: (direction: TextDirection) => void; onDelete: () => void; onDuplicate: () => void }) {
   if (!selected) return <div className="empty-inspector"><span className="empty-glyph">⌁</span><strong>Select an object</strong><p>Text, tables, form fields, and recognized graphics keep their own semantic metadata.</p></div>;
   if (selected.type !== "text") return <div className="object-inspector"><span className="eyebrow">{selected.type.replace("-", " ")}</span><h2>{objectLabel(selected)}</h2><div className="confidence-card"><span>Recognition confidence</span><strong>{formatConfidence(selected.confidence)}</strong><i><b style={{ width: `${selected.confidence * 100}%` }} /></i></div><dl><div><dt>Source</dt><dd>{selected.source}</dd></div><div><dt>Bounds</dt><dd>{Math.round(selected.bbox.width)} × {Math.round(selected.bbox.height)} pt</dd></div><div><dt>Direction</dt><dd>{selected.direction}</dd></div></dl><div className="inspector-buttons"><button onClick={onDuplicate}>Duplicate</button><button className="danger" onClick={onDelete}>Delete</button></div></div>;
   return <div className="object-inspector">
     <div className="property-heading"><div><span className="eyebrow">Text block</span><h2>Content & type</h2></div><span className={`source-pill ${selected.source}`}>{selected.source}</span></div>
     <label className="field-label">Text <textarea value={selected.text} dir={selected.direction === "auto" ? undefined : selected.direction} onChange={(event) => onTextChange(event.target.value)} /></label>
     <div className="field-grid">
-      <label className="field-label">Font <select value={selected.style.fontFamily.includes("Noto") ? "Noto Naskh Arabic" : "Inter"} onChange={(event) => onStyleChange({ fontFamily: event.target.value === "Noto Naskh Arabic" ? "Noto Naskh Arabic, Arial, sans-serif" : "Inter, Arial, sans-serif" })}><option>Inter</option><option>Noto Naskh Arabic</option><option>Arial</option></select></label>
+      <label className="field-label">Font <select value={selected.style.fontFamily.includes("Noto") ? "arabic" : selected.style.fontFamily.includes("Arial") ? "arial" : "inter"} onChange={(event) => onStyleChange({ fontFamily: event.target.value === "arabic" ? "Noto Naskh Arabic, Arial, sans-serif" : event.target.value === "arial" ? "Arial, sans-serif" : "Inter, Arial, sans-serif" })}><option value="inter">Inter</option><option value="arabic">Arabic</option><option value="arial">Arial</option></select></label>
       <label className="field-label">Size <input type="number" min="7" max="72" value={Math.round(selected.style.fontSize)} onChange={(event) => onStyleChange({ fontSize: Number(event.target.value) || 12 })} /></label>
     </div>
     <div className="format-strip"><button className={selected.style.fontWeight >= 600 ? "is-on" : ""} onClick={() => onStyleChange({ fontWeight: selected.style.fontWeight >= 600 ? 400 : 700 })}><b>B</b></button><button className={selected.style.fontStyle === "italic" ? "is-on" : ""} onClick={() => onStyleChange({ fontStyle: selected.style.fontStyle === "italic" ? "normal" : "italic" })}><i>I</i></button><input aria-label="Text color" type="color" value={selected.style.color} onChange={(event) => onStyleChange({ color: event.target.value })} /><span /></div>
+    <div className="field-grid">
+      <label className="field-label">Align <select value={selected.style.align} onChange={(event) => onStyleChange({ align: event.target.value as TextStyle["align"] })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
+      <label className="field-label">Rotation <input type="number" min="-180" max="180" value={Math.round(selected.rotation)} onChange={(event) => onRotationChange(Number(event.target.value) || 0)} /></label>
+    </div>
+    <div className="field-grid">
+      <label className="field-label">Line height <input type="number" min="0.8" max="3" step="0.1" value={selected.style.lineHeight} onChange={(event) => onStyleChange({ lineHeight: clamp(Number(event.target.value) || 1, 0.8, 3) })} /></label>
+      <label className="field-label">Spacing <input type="number" min="-2" max="12" step="0.1" value={selected.style.letterSpacing} onChange={(event) => onStyleChange({ letterSpacing: clamp(Number(event.target.value) || 0, -2, 12) })} /></label>
+    </div>
     <div className="direction-control"><span>Paragraph direction</span><div><button className={selected.direction === "ltr" ? "is-on" : ""} onClick={() => onDirectionChange("ltr")}>LTR</button><button className={selected.direction === "rtl" ? "is-on" : ""} onClick={() => onDirectionChange("rtl")}>RTL</button><button className={selected.direction === "auto" ? "is-on" : ""} onClick={() => onDirectionChange("auto")}>Auto</button></div></div>
     <div className="confidence-card"><span>Extraction confidence</span><strong>{formatConfidence(selected.confidence)}</strong><i><b style={{ width: `${selected.confidence * 100}%` }} /></i></div>
     <div className="inspector-buttons"><button onClick={onDuplicate}>Duplicate</button><button className="danger" onClick={onDelete}>Delete</button></div>

@@ -14,6 +14,18 @@ export function shouldRenderTextContent(object: TextBlock, pageHasBackground: bo
 export function needsNativeCanvasReplacement(object: TextBlock): boolean {
   if (object.source !== "native-pdf") return false;
   if (object.originalText !== object.text) return true;
+  if (object.originalRotation !== undefined && object.originalRotation !== object.rotation) return true;
+  const originalStyle = object.originalStyle;
+  if (originalStyle && (
+    originalStyle.fontFamily !== object.style.fontFamily
+    || originalStyle.fontSize !== object.style.fontSize
+    || originalStyle.fontWeight !== object.style.fontWeight
+    || originalStyle.fontStyle !== object.style.fontStyle
+    || originalStyle.color !== object.style.color
+    || originalStyle.lineHeight !== object.style.lineHeight
+    || originalStyle.letterSpacing !== object.style.letterSpacing
+    || originalStyle.align !== object.style.align
+  )) return true;
   const original = object.originalBbox;
   if (!original) return false;
   return original.x !== object.bbox.x || original.y !== object.bbox.y || original.width !== object.bbox.width || original.height !== object.bbox.height;

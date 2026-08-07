@@ -68,6 +68,21 @@ test("moving native text redraws it at the new location on the page canvas", () 
   assert.equal(isTextReplacementPreview(native, true, false), true);
 });
 
+test("changing native text formatting requires a canvas replacement", () => {
+  const document = createDemoDocument();
+  const text = document.pages[0].objects.find((object) => object.type === "text");
+  assert.ok(text && text.type === "text");
+  const native = {
+    ...text,
+    source: "native-pdf" as const,
+    originalText: text.text,
+    originalStyle: { ...text.style },
+    originalRotation: text.rotation,
+    style: { ...text.style, letterSpacing: 1.5 },
+  };
+  assert.equal(needsNativeCanvasReplacement(native), true);
+});
+
 test("high-resolution OCR maps line bounds into page coordinates and preserves Arabic direction", () => {
   const tokens = tokensFromTesseractBlocks([{
     paragraphs: [{

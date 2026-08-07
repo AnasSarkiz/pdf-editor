@@ -1,4 +1,4 @@
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { PDFDocument, StandardFonts, degrees, rgb } from "pdf-lib";
 import type { EditableDocument, PageObject, TextBlock } from "./document-model";
 
 export type ExportStrategy = "patch" | "reconstruct" | "flatten" | "ocr-layer" | "optimize";
@@ -10,7 +10,19 @@ export interface ExportReadiness {
 }
 
 function isChangedNativeText(object: PageObject): object is TextBlock {
-  return object.type === "text" && object.source === "native-pdf" && object.originalText !== object.text;
+  if (object.type !== "text" || object.source !== "native-pdf") return false;
+  if (object.originalText !== object.text || object.originalRotation !== undefined && object.originalRotation !== object.rotation) return true;
+  const originalStyle = object.originalStyle;
+  return Boolean(originalStyle && (
+    originalStyle.fontFamily !== object.style.fontFamily
+    || originalStyle.fontSize !== object.style.fontSize
+    || originalStyle.fontWeight !== object.style.fontWeight
+    || originalStyle.fontStyle !== object.style.fontStyle
+    || originalStyle.color !== object.style.color
+    || originalStyle.lineHeight !== object.style.lineHeight
+    || originalStyle.letterSpacing !== object.style.letterSpacing
+    || originalStyle.align !== object.style.align
+  ));
 }
 
 function hasArabic(text: string): boolean {
@@ -93,13 +105,20 @@ export async function exportPdf(document: EditableDocument, originalBytes?: Uint
     if (originalBytes && object.source !== "user") continue;
     const page = pdf.getPages()[pageIndex];
     const color = hexToRgb(object.style.color);
+    const drawFont = object.style.fontWeight >= 600 ? bold : font;
+    const textWidth = Math.max(...object.text.split(/\r?\n/).map((line) => drawFont.widthOfTextAtSize(line, object.style.fontSize) + Math.max(0, line.length - 1) * object.style.letterSpacing));
+    const x = object.style.align === "right"
+      ? object.bbox.x + object.bbox.width - textWidth
+      : object.style.align === "center"
+        ? object.bbox.x + (object.bbox.width - textWidth) / 2
+        : object.bbox.x;
     page.drawText(object.text, {
-      x: object.bbox.x,
+      x,
       y: document.pages[pageIndex].height - object.bbox.y - object.style.fontSize,
       size: object.style.fontSize,
-      font: object.style.fontWeight >= 600 ? bold : font,
+      font: drawFont,
       color: rgb(color.red, color.green, color.blue),
-      rotate: object.rotation ? undefined : undefined,
+      rotate: object.rotation ? degrees(-object.rotation) : undefined,
       maxWidth: object.bbox.width,
       lineHeight: object.style.fontSize * object.style.lineHeight,
     });
