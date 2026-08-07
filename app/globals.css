@@ -175,6 +175,9 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .export-readiness p { margin: 6px 0 0; color: #6c7975; font-size: 10px; line-height: 1.45; }
 .search-field { display: flex; align-items: center; gap: 7px; padding: 0 8px; border: 1px solid #d6dfda; border-radius: 4px; color: #80908b; background: #fff; }
 .search-field input { width: 100%; height: 36px; border: 0; outline: 0; color: #283633; background: transparent; font-size: 12px; }
+.replace-field { margin-top: 8px; }
+.replace-all-button { width: 100%; margin-top: 8px; padding: 9px 10px; border: 1px solid #1b968b; border-radius: 4px; color: #fff; background: var(--teal); font-size: 11px; font-weight: 750; }
+.replace-all-button:hover:not(:disabled) { background: #23aa9d; }
 .search-hint { margin: 11px 0 15px; color: #7d8986; font-size: 10px; line-height: 1.55; }
 .search-result { width: 100%; margin-bottom: 7px; padding: 9px; border: 1px solid #e0e6e2; border-radius: 4px; background: #fff; text-align: left; }
 .search-result:hover { border-color: #a7cfc7; background: #f4fbf8; }

@@ -73,6 +73,10 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
+function escapeRegularExpression(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 const MIN_TEXT_BOX_WIDTH = 24;
 const MIN_TEXT_BOX_HEIGHT = 20;
 
@@ -235,6 +239,45 @@ export default function Home() {
     setSelectedId(object.id);
     setActiveTool("select");
     setNotice("Text box resized. Use Undo to restore its previous size.");
+  }
+
+  function replaceAllMatches(replacement: string): void {
+    const query = search.trim();
+    if (!query) {
+      setNotice("Enter text to find before replacing it.");
+      return;
+    }
+    const operations: EditOperation[] = [];
+    documentModel.pages.forEach((entry) => {
+      entry.objects.forEach((object) => {
+        if (object.type !== "text") return;
+        const nextText = object.text.replace(new RegExp(escapeRegularExpression(query), "giu"), replacement);
+        if (nextText === object.text) return;
+        const nextObject: TextBlock = {
+          ...object,
+          text: nextText,
+          ...detectTextMeta(nextText),
+          ...(object.source === "user" ? { bbox: fitTextBounds(nextText, object.bbox, entry.width, entry.height, object.style, object.bbox) } : {}),
+        };
+        operations.push({
+          id: stableId("op"),
+          type: "update",
+          targetId: object.id,
+          pageId: entry.id,
+          at: new Date().toISOString(),
+          before: object,
+          after: nextObject,
+          label: `Replaced text in ${objectLabel(object)}`,
+        });
+      });
+    });
+    if (!operations.length) {
+      setNotice(`No matches found for “${query}”.`);
+      return;
+    }
+    setDocumentModel((current) => operations.reduce((next, operation) => applyOperation(next, operation, "after"), current));
+    setHistory((current) => ({ entries: [...current.entries.slice(0, current.cursor), ...operations], cursor: current.cursor + operations.length }));
+    setNotice(`Replaced ${operations.length} text block${operations.length === 1 ? "" : "s"}. Use Undo to step back through each change.`);
   }
 
   async function onFileChange(event: ChangeEvent<HTMLInputElement>): Promise<void> {
@@ -421,7 +464,7 @@ export default function Home() {
           {activePanel === "properties" && <PropertiesPanel selected={selected} onTextChange={(text) => selected?.type === "text" && updateSelected({ text, ...detectTextMeta(text), ...(selected.source === "user" ? { bbox: fitTextBounds(text, selected.bbox, page.width, page.height, selected.style, selected.bbox) } : {}) }, "Edited text")} onStyleChange={(style) => selected?.type === "text" && updateSelected({ style: { ...selected.style, ...style } }, "Changed text style")} onRotationChange={(rotation) => selected?.type === "text" && updateSelected({ rotation: clamp(rotation, -180, 180) }, "Rotated text")} onDirectionChange={(direction) => selected?.type === "text" && updateSelected({ direction }, "Changed paragraph direction")} onDelete={deleteSelected} onDuplicate={duplicateSelected} />}
           {activePanel === "layers" && <LayersPanel page={page} selectedId={selectedId} onSelect={setSelectedId} />}
           {activePanel === "review" && <ReviewPanel page={page} readiness={exportReadiness} />}
-          {activePanel === "search" && <SearchPanel search={search} setSearch={setSearch} document={documentModel} onSelect={(id) => { setSelectedId(id); const located = findObject(documentModel, id); if (located) setCurrentPageIndex(located.pageIndex); }} />}
+          {activePanel === "search" && <SearchPanel search={search} setSearch={setSearch} document={documentModel} onReplaceAll={replaceAllMatches} onSelect={(id) => { setSelectedId(id); const located = findObject(documentModel, id); if (located) setCurrentPageIndex(located.pageIndex); }} />}
         </aside>
       </section>
 
@@ -712,7 +755,16 @@ function ReviewPanel({ page, readiness }: { page: EditableDocument["pages"][numb
   return <div className="review-panel"><div className="panel-heading"><span className="eyebrow">Quality gate</span><h2>Recognition review</h2></div><div className="review-hero"><span>{page.sourceKind === "native" ? "Native source" : page.sourceKind === "hybrid" ? "Hybrid source" : "Scanned source"}</span><strong>{page.nativeTextCount + ocrTextCount} text objects</strong><small>{ocrTextCount ? `Local Arabic + English OCR · 300 dpi · ${ocrTextCount} blocks` : `${page.imageCount} image operations detected`}</small></div><div className="review-list">{uncertain.length ? uncertain.map((object) => <div key={object.id}><span className="warning-dot" /><p><strong>{objectLabel(object)}</strong><small>{formatConfidence(object.confidence)} confidence · {object.source}</small></p><button>Review</button></div>) : <div className="review-clear"><span>✓</span><p>All current objects meet the review threshold.</p></div>}</div><div className={`export-readiness ${readiness.canExport ? "ready" : "held"}`}><span>{readiness.canExport ? "Export ready" : "Export held"}</span>{readiness.messages.map((message) => <p key={message}>{message}</p>)}</div></div>;
 }
 
-function SearchPanel({ search, setSearch, document, onSelect }: { search: string; setSearch: (value: string) => void; document: EditableDocument; onSelect: (id: string) => void }) {
+function SearchPanel({ search, setSearch, document, onReplaceAll, onSelect }: { search: string; setSearch: (value: string) => void; document: EditableDocument; onReplaceAll: (replacement: string) => void; onSelect: (id: string) => void }) {
+  const [replacement, setReplacement] = useState("");
   const results = search.trim() ? document.pages.flatMap((page) => page.objects.filter((object): object is TextBlock => object.type === "text" && object.text.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())).map((object) => ({ page: page.number, object }))) : [];
-  return <div className="search-panel"><div className="panel-heading"><span className="eyebrow">Semantic search</span><h2>Find text</h2></div><label className="search-field"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Arabic or English text" autoFocus /></label><p className="search-hint">Search runs against native text and accepted OCR spans. It respects Unicode text; no Arabic reversal is used.</p>{results.map(({ page, object }) => <button className="search-result" key={object.id} onClick={() => onSelect(object.id)}><small>Page {page} · {object.language} · {object.direction}</small><strong>{object.text}</strong></button>)}{search && !results.length && <div className="no-results">No semantic text matches.</div>}</div>;
+  return <div className="search-panel">
+    <div className="panel-heading"><span className="eyebrow">Semantic search</span><h2>Find & replace</h2></div>
+    <label className="search-field"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find Arabic or English text" autoFocus /></label>
+    <label className="search-field replace-field"><span>↻</span><input value={replacement} onChange={(event) => setReplacement(event.target.value)} placeholder="Replace with" /></label>
+    <button className="replace-all-button" disabled={!search.trim() || !results.length} onClick={() => onReplaceAll(replacement)}>Replace all ({results.length})</button>
+    <p className="search-hint">Search and replace use semantic text, preserve mixed Arabic and English direction, and can be undone one change at a time.</p>
+    {results.map(({ page, object }) => <button className="search-result" key={object.id} onClick={() => onSelect(object.id)}><small>Page {page} · {object.language} · {object.direction}</small><strong>{object.text}</strong></button>)}
+    {search && !results.length && <div className="no-results">No semantic text matches.</div>}
+  </div>;
 }
