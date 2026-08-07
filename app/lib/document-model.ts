@@ -254,7 +254,7 @@ export function createDemoDocument(): EditableDocument {
     id: stableId("document"),
     metadata: {
       filename: "mixed-language-proof-of-concept.pdf",
-      title: "Naskh Studio — mixed-language proof of concept",
+      title: "PDF Editor — mixed-language proof of concept",
       pageCount: 1,
       createdAt: new Date().toISOString(),
       processingMode: "browser",
@@ -272,7 +272,7 @@ export function createDemoDocument(): EditableDocument {
         imageCount: 1,
         analysisStatus: "needs-review",
         objects: [
-          text("NASKH STUDIO", { x: 54, y: 50, width: 220, height: 26 }, { fontSize: 24, fontWeight: 700, color: "#1a756e", letterSpacing: 1.8 }),
+          text("PDF EDITOR", { x: 54, y: 50, width: 220, height: 26 }, { fontSize: 24, fontWeight: 700, color: "#1a756e", letterSpacing: 1.8 }),
           text(arabic, { x: 54, y: 108, width: 468, height: 36 }, { fontFamily: "Noto Naskh Arabic, Arial, sans-serif", fontSize: 25, fontWeight: 600 }, "inferred"),
           text(english, { x: 54, y: 161, width: 430, height: 22 }, { fontSize: 14, color: "#67716e" }),
           text("This semantic sample proves mixed-direction selection and operation-based editing. It is not a raster page.", { x: 54, y: 216, width: 432, height: 42 }, { fontSize: 14, lineHeight: 1.5 }),

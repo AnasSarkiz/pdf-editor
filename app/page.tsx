@@ -320,9 +320,9 @@ export default function Home() {
   return (
     <main className="studio-shell" onKeyDown={handlePageKeyDown}>
       <header className="topbar">
-        <div className="brand-lockup" aria-label="Naskh Studio">
-          <span className="brand-mark">ن</span>
-          <span>Naskh <em>Studio</em></span>
+        <div className="brand-lockup" aria-label="PDF Editor">
+          <span className="brand-mark">P</span>
+          <span>PDF <em>Editor</em></span>
         </div>
         <div className="document-title">
           <span className="file-dot" />
@@ -389,7 +389,7 @@ export default function Home() {
               } as CSSProperties}
             >
               <PageRenderSurface page={page} mutedTextId={inlineEditing} />
-              {!page.background && <div className="demo-folio">NASKH / 01</div>}
+              {!page.background && <div className="demo-folio">PDF / 01</div>}
               {page.objects.map((object) => (
                 <SemanticObject
                   key={object.id}

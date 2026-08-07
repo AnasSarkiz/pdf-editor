@@ -1,6 +1,6 @@
-# Naskh Studio architecture
+# PDF Editor architecture
 
-Naskh Studio is a semantic PDF editor, not a screenshot editor. The source of truth is an `EditableDocument` intermediate representation (IR); the rendered PDF is a view of the source document and the semantic edit layer is a separate interaction surface.
+PDF Editor is a semantic PDF editor, not a screenshot editor. The source of truth is an `EditableDocument` intermediate representation (IR); the rendered PDF is a view of the source document and the semantic edit layer is a separate interaction surface.
 
 ## Current proof-of-concept scope
 

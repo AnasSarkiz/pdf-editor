@@ -1,6 +1,6 @@
-# Naskh Studio
+# PDF Editor
 
-Naskh Studio is a web-based PDF editor proof of concept built around a normalized, editable document model rather than visual page overlays. It is designed for Arabic, English, and mixed-direction documents.
+PDF Editor is a web-based PDF editor proof of concept built around a normalized, editable document model rather than visual page overlays. It is designed for Arabic, English, and mixed-direction documents.
 
 ## What this build demonstrates
 

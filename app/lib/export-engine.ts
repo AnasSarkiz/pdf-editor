@@ -105,7 +105,7 @@ export async function exportPdf(document: EditableDocument, originalBytes?: Uint
     });
   }
   pdf.setTitle(document.metadata.title ?? document.metadata.filename);
-  pdf.setProducer("Naskh Studio browser proof of concept");
+  pdf.setProducer("PDF Editor browser proof of concept");
   return pdf.save();
 }
 
