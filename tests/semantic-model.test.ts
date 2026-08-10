@@ -36,6 +36,36 @@ test("export is explicitly held when a reconstruction needs Arabic shaping", () 
   assert.match(readiness.messages.join(" "), /Arabic/);
 });
 
+test("redactions and page organization require a flattened export", () => {
+  const document = createDemoDocument();
+  document.pages[0].objects.push({
+    id: "redaction-test",
+    type: "annotation",
+    pageId: document.pages[0].id,
+    bbox: { x: 20, y: 20, width: 100, height: 18 },
+    rotation: 0,
+    transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+    confidence: 1,
+    source: "user",
+    zIndex: 120,
+    language: "und",
+    direction: "auto",
+    relationships: [],
+    annotationKind: "redaction",
+    color: "#000000",
+    opacity: 1,
+    text: "REDACTED",
+  });
+  const annotated = getExportReadiness(document, new Uint8Array([1]));
+  assert.equal(annotated.canExport, false);
+  assert.equal(annotated.mode, "flatten");
+  assert.match(annotated.messages.join(" "), /redaction/i);
+
+  const organized = getExportReadiness(createDemoDocument(), new Uint8Array([1]), true);
+  assert.equal(organized.canExport, false);
+  assert.equal(organized.mode, "flatten");
+});
+
 test("an edited native text block returns to the shared page canvas after inline editing ends", () => {
   const document = createDemoDocument();
   const text = document.pages[0].objects.find((object) => object.type === "text");

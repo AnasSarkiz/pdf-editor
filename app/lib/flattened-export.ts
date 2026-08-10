@@ -1,5 +1,5 @@
 import { PDFDocument } from "pdf-lib";
-import type { DocumentPage, EditableDocument, Rect, TextBlock } from "./document-model";
+import type { AnnotationObject, DocumentPage, EditableDocument, Rect, TextBlock } from "./document-model";
 import { needsNativeCanvasReplacement } from "./editor-visibility";
 
 function loadImage(source: string): Promise<HTMLImageElement> {
@@ -92,6 +92,50 @@ function drawText(context: CanvasRenderingContext2D, block: TextBlock): void {
   context.restore();
 }
 
+function drawAnnotation(context: CanvasRenderingContext2D, annotation: AnnotationObject): void {
+  const { bbox } = annotation;
+  context.save();
+  context.globalAlpha = annotation.opacity;
+  if (annotation.annotationKind === "highlight") {
+    context.fillStyle = annotation.color;
+    context.fillRect(bbox.x, bbox.y, bbox.width, bbox.height);
+  }
+  if (annotation.annotationKind === "comment") {
+    context.fillStyle = annotation.color;
+    context.strokeStyle = "rgba(125, 91, 10, .6)";
+    context.lineWidth = 1;
+    context.fillRect(bbox.x, bbox.y, bbox.width, bbox.height);
+    context.strokeRect(bbox.x, bbox.y, bbox.width, bbox.height);
+    context.globalAlpha = 1;
+    context.fillStyle = "#5f4810";
+    context.font = "600 12px Inter, Arial, sans-serif";
+    context.textBaseline = "top";
+    const words = (annotation.text || "Comment").split(/\s+/);
+    let line = "";
+    let y = bbox.y + 8;
+    for (const word of words) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (context.measureText(candidate).width > Math.max(20, bbox.width - 14) && line) {
+        context.fillText(line, bbox.x + 7, y);
+        y += 15;
+        line = word;
+      } else line = candidate;
+    }
+    if (line && y < bbox.y + bbox.height - 4) context.fillText(line, bbox.x + 7, y);
+  }
+  if (annotation.annotationKind === "redaction") {
+    context.globalAlpha = 1;
+    context.fillStyle = annotation.color;
+    context.fillRect(bbox.x, bbox.y, bbox.width, bbox.height);
+    context.fillStyle = "#ffffff";
+    context.font = "700 9px Inter, Arial, sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(annotation.text || "REDACTED", bbox.x + bbox.width / 2, bbox.y + bbox.height / 2, Math.max(0, bbox.width - 8));
+  }
+  context.restore();
+}
+
 async function flattenPage(page: DocumentPage): Promise<HTMLCanvasElement> {
   const image = page.background ? await loadImage(page.background) : null;
   const scaleX = image ? image.naturalWidth / page.width : 3;
@@ -112,6 +156,13 @@ async function flattenPage(page: DocumentPage): Promise<HTMLCanvasElement> {
     context.save();
     context.scale(scaleX, scaleY);
     drawText(context, block);
+    context.restore();
+  }
+  const annotations = page.objects.filter((object): object is AnnotationObject => object.type === "annotation");
+  for (const annotation of annotations) {
+    context.save();
+    context.scale(scaleX, scaleY);
+    drawAnnotation(context, annotation);
     context.restore();
   }
   return canvas;

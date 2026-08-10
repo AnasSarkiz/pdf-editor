@@ -29,14 +29,28 @@ function hasArabic(text: string): boolean {
   return /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(text);
 }
 
-export function getExportReadiness(document: EditableDocument, originalBytes?: Uint8Array): ExportReadiness {
+export function getExportReadiness(document: EditableDocument, originalBytes?: Uint8Array, hasPageStructureChanges = false): ExportReadiness {
   const changedNativeText = document.pages.flatMap((page) => page.objects.filter(isChangedNativeText));
+  const annotations = document.pages.flatMap((page) => page.objects.filter((object) => object.type === "annotation"));
   const arabicUserText = document.pages.flatMap((page) => page.objects).filter(
     (object) => object.type === "text" && object.source === "user" && hasArabic(object.text),
   );
   const arabicReconstructionText = !originalBytes
     ? document.pages.flatMap((page) => page.objects).filter((object) => object.type === "text" && hasArabic(object.text))
     : [];
+  if (annotations.length > 0 || hasPageStructureChanges) {
+    const redactionCount = annotations.filter((annotation) => annotation.annotationKind === "redaction").length;
+    return {
+      canExport: false,
+      mode: "flatten",
+      messages: [
+        redactionCount
+          ? `${redactionCount} redaction${redactionCount === 1 ? "" : "s"} will be permanently flattened into the downloaded PDF.`
+          : "Review markup or page organization will export as a high-quality flattened PDF.",
+        "The exported file preserves the visible page result without retaining the covered source content.",
+      ],
+    };
+  }
   if (originalBytes && changedNativeText.length > 0) {
     return {
       canExport: false,
