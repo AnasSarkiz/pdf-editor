@@ -10,7 +10,9 @@ type RenderablePdfPage = {
   render: (input: { canvas: HTMLCanvasElement; canvasContext: CanvasRenderingContext2D; viewport: { width: number; height: number } }) => { promise: Promise<void> };
 };
 
-const PREVIEW_RENDER_SCALE = 2;
+// 216 dpi source pages keep the browser view and flattened fallback export
+// sharp enough for business documents without rendering at full print size.
+const PREVIEW_RENDER_SCALE = 3;
 const OCR_RENDER_SCALE = 300 / 72;
 
 interface NativeTextItem {

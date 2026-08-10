@@ -42,8 +42,8 @@ export function getExportReadiness(document: EditableDocument, originalBytes?: U
       canExport: false,
       mode: "reconstruct",
       messages: [
-        "Native text has been changed. This browser-only build will not cover old glyphs or silently rasterize the page.",
-        "Choose the reconstruction worker when it is configured; untouched pages remain lossless in patch export.",
+        "Native text has been changed. Export PDF will download a flattened edited copy so no work is lost.",
+        "A reconstruction worker is still required for a lossless native-text PDF export.",
       ],
     };
   }
@@ -52,7 +52,7 @@ export function getExportReadiness(document: EditableDocument, originalBytes?: U
       canExport: false,
       mode: "reconstruct",
       messages: [
-        "Arabic user text requires HarfBuzz shaping plus an embeddable Arabic font. Export is deliberately held until that worker is configured.",
+        "Arabic user text will export as a flattened edited copy until HarfBuzz shaping and an embeddable font are configured.",
       ],
     };
   }

@@ -2,6 +2,7 @@
 
 import { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { downloadPdf, exportPdf, getExportReadiness } from "./lib/export-engine";
+import { exportFlattenedPdf } from "./lib/flattened-export";
 import type { DocumentPage, EditableDocument, EditOperation, PageObject, Rect, TextBlock, TextDirection, TextStyle } from "./lib/document-model";
 import { createDemoDocument, defaultTextStyle, detectTextMeta, identityMatrix, stableId } from "./lib/document-model";
 import { isTextReplacementPreview, needsNativeCanvasReplacement, shouldRenderTextContent } from "./lib/editor-visibility";
@@ -114,6 +115,7 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [inlineEditing, setInlineEditing] = useState<string | null>(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const page = documentModel.pages[currentPageIndex] ?? documentModel.pages[0];
@@ -313,17 +315,19 @@ export default function Home() {
   }
 
   async function handleExport(): Promise<void> {
-    if (!exportReadiness.canExport) {
-      setNotice(exportReadiness.messages[0]);
-      setActivePanel("review");
-      return;
-    }
+    if (isExporting) return;
     try {
-      const bytes = await exportPdf(documentModel, originalBytes);
+      setIsExporting(true);
+      const flattened = !exportReadiness.canExport;
+      const bytes = flattened ? await exportFlattenedPdf(documentModel) : await exportPdf(documentModel, originalBytes);
       downloadPdf(bytes, documentModel.metadata.filename);
-      setNotice(`Exported ${documentModel.metadata.filename.replace(/\.pdf$/i, "")}-edited.pdf as a valid PDF.`);
+      setNotice(flattened
+        ? `Downloaded ${documentModel.metadata.filename.replace(/\.pdf$/i, "")}-edited.pdf. This edited fallback preserves the visible page appearance.`
+        : `Exported ${documentModel.metadata.filename.replace(/\.pdf$/i, "")}-edited.pdf as a valid PDF.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Export failed.");
+    } finally {
+      setIsExporting(false);
     }
   }
 
@@ -376,7 +380,7 @@ export default function Home() {
           <button className="quiet-button" onClick={undo} disabled={history.cursor === 0} aria-label="Undo">↶</button>
           <button className="quiet-button" onClick={redo} disabled={history.cursor >= history.entries.length} aria-label="Redo">↷</button>
           <button className="open-button" onClick={() => inputRef.current?.click()}>{isImporting ? "Opening…" : "Open PDF"}</button>
-          <button className="export-button" onClick={handleExport}>Export PDF <span>↗</span></button>
+          <button className="export-button" onClick={handleExport} disabled={isExporting}>{isExporting ? "Exporting…" : "Export PDF"} <span>↗</span></button>
           <input ref={inputRef} onChange={onFileChange} accept="application/pdf,.pdf" type="file" hidden />
         </div>
       </header>
