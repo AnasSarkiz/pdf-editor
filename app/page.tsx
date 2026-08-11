@@ -3,20 +3,17 @@
 import { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { downloadPdf, exportPdf, getExportReadiness } from "./lib/export-engine";
 import { exportFlattenedPdf } from "./lib/flattened-export";
-import type { AnnotationKind, AnnotationObject, DocumentPage, EditableDocument, EditOperation, PageObject, Rect, TextBlock, TextDirection, TextStyle } from "./lib/document-model";
+import type { DocumentPage, EditableDocument, EditOperation, PageObject, Rect, TextBlock, TextDirection, TextStyle } from "./lib/document-model";
 import { createDemoDocument, defaultTextStyle, detectTextMeta, identityMatrix, stableId } from "./lib/document-model";
 import { isTextReplacementPreview, needsNativeCanvasReplacement, shouldRenderTextContent } from "./lib/editor-visibility";
 import { importPdf, type PdfLoadProgress } from "./lib/pdf-core";
 
-type Tool = "select" | "text" | "highlight" | "comment" | "redact" | "table" | "image" | "shape" | "signature" | "form" | "hand";
-type Panel = "properties" | "layers" | "review" | "search" | "organize";
+type Tool = "select" | "text" | "table" | "image" | "shape" | "signature" | "form" | "hand";
+type Panel = "properties" | "layers" | "review" | "search";
 
 const tools: Array<{ id: Tool; mark: string; label: string }> = [
   { id: "select", mark: "↖", label: "Select" },
   { id: "text", mark: "T", label: "Text" },
-  { id: "highlight", mark: "▰", label: "Highlight" },
-  { id: "comment", mark: "▱", label: "Comment" },
-  { id: "redact", mark: "■", label: "Redact" },
   { id: "table", mark: "▦", label: "Table" },
   { id: "image", mark: "◫", label: "Image" },
   { id: "shape", mark: "◇", label: "Shape" },
@@ -37,33 +34,8 @@ function findObject(document: EditableDocument, objectId: string): { pageIndex: 
   return null;
 }
 
-function normalizePages(document: EditableDocument): EditableDocument {
-  document.pages.forEach((entry, index) => { entry.number = index + 1; });
-  document.metadata.pageCount = document.pages.length;
-  return document;
-}
-
 function applyOperation(document: EditableDocument, operation: EditOperation, phase: "before" | "after"): EditableDocument {
   const next = cloneDocument(document);
-  if (operation.pageSnapshot) {
-    const snapshotIndex = operation.pageSnapshot ? next.pages.findIndex((entry) => entry.id === operation.pageSnapshot?.id) : -1;
-    if (operation.type === "create") {
-      if (phase === "before" && snapshotIndex >= 0) next.pages.splice(snapshotIndex, 1);
-      if (phase === "after") next.pages.splice(operation.pageAfterIndex ?? next.pages.length, 0, structuredClone(operation.pageSnapshot));
-    }
-    if (operation.type === "delete") {
-      if (phase === "after" && snapshotIndex >= 0) next.pages.splice(snapshotIndex, 1);
-      if (phase === "before") next.pages.splice(operation.pageBeforeIndex ?? next.pages.length, 0, structuredClone(operation.pageSnapshot));
-    }
-    return normalizePages(next);
-  }
-  if (operation.type === "reorder" && operation.pageBeforeIndex !== undefined && operation.pageAfterIndex !== undefined) {
-    const from = phase === "after" ? operation.pageBeforeIndex : operation.pageAfterIndex;
-    const to = phase === "after" ? operation.pageAfterIndex : operation.pageBeforeIndex;
-    const [moved] = next.pages.splice(from, 1);
-    if (moved) next.pages.splice(to, 0, moved);
-    return normalizePages(next);
-  }
   const target = findObject(next, operation.targetId);
   if (operation.type === "create") {
     if (phase === "before") {
@@ -89,7 +61,6 @@ function applyOperation(document: EditableDocument, operation: EditOperation, ph
 
 function objectLabel(object: PageObject): string {
   if (object.type === "text") return object.text.replace(/\s+/g, " ").slice(0, 32) || "Empty text";
-  if (object.type === "annotation") return object.annotationKind === "redaction" ? "Redaction" : object.annotationKind === "highlight" ? "Highlight" : object.text || "Comment";
   if (object.type === "table") return `${object.rows} × ${object.columns} table`;
   if (object.type === "form-field") return object.name || "Form field";
   return object.type;
@@ -158,11 +129,7 @@ export default function Home() {
       ),
     );
   }, [documentModel, search]);
-  const hasPageStructureChanges = useMemo(
-    () => history.entries.slice(0, history.cursor).some((operation) => operation.pageSnapshot || operation.type === "reorder" && operation.pageBeforeIndex !== undefined),
-    [history],
-  );
-  const exportReadiness = useMemo(() => getExportReadiness(documentModel, originalBytes, hasPageStructureChanges), [documentModel, originalBytes, hasPageStructureChanges]);
+  const exportReadiness = useMemo(() => getExportReadiness(documentModel, originalBytes), [documentModel, originalBytes]);
 
   function commit(operation: EditOperation): void {
     setDocumentModel((current) => applyOperation(current, operation, "after"));
@@ -171,20 +138,6 @@ export default function Home() {
 
   function updateSelected(changes: Partial<TextBlock>, label: string): void {
     if (!selected || selected.type !== "text") return;
-    commit({
-      id: stableId("op"),
-      type: "update",
-      targetId: selected.id,
-      pageId: selected.pageId,
-      at: new Date().toISOString(),
-      before: selected,
-      after: { ...selected, ...changes },
-      label,
-    });
-  }
-
-  function updateAnnotation(changes: Partial<AnnotationObject>, label: string): void {
-    if (!selected || selected.type !== "annotation") return;
     commit({
       id: stableId("op"),
       type: "update",
@@ -242,97 +195,6 @@ export default function Home() {
     setNotice("New text object added. Type directly on the page or use the inspector.");
   }
 
-  function addAnnotation(annotationKind: AnnotationKind): void {
-    if (!page) return;
-    const presets: Record<AnnotationKind, Pick<AnnotationObject, "bbox" | "color" | "opacity" | "text">> = {
-      highlight: { bbox: { x: 72, y: 140, width: Math.min(200, page.width - 96), height: 22 }, color: "#f5cf42", opacity: 0.52 },
-      comment: { bbox: { x: 72, y: 190, width: Math.min(190, page.width - 96), height: 64 }, color: "#fff1a8", opacity: 1, text: "Add a comment" },
-      redaction: { bbox: { x: 72, y: 270, width: Math.min(170, page.width - 96), height: 24 }, color: "#111827", opacity: 1, text: "REDACTED" },
-    };
-    const preset = presets[annotationKind];
-    const annotation: AnnotationObject = {
-      id: stableId(annotationKind),
-      type: "annotation",
-      pageId: page.id,
-      bbox: preset.bbox,
-      rotation: 0,
-      transform: identityMatrix,
-      confidence: 1,
-      source: "user",
-      zIndex: 120,
-      language: "und",
-      direction: "auto",
-      relationships: [],
-      annotationKind,
-      color: preset.color,
-      opacity: preset.opacity,
-      text: preset.text,
-    };
-    commit({ id: stableId("op"), type: "create", targetId: annotation.id, pageId: page.id, at: new Date().toISOString(), after: annotation, label: `Added ${annotationKind}` });
-    setSelectedId(annotation.id);
-    setActiveTool(annotationKind === "redaction" ? "redact" : annotationKind);
-    setActivePanel("properties");
-    setNotice(annotationKind === "redaction" ? "Redaction added. Drag and resize it over sensitive content; export permanently flattens it into the downloaded PDF." : `Added ${annotationKind}. Drag and resize it directly on the page.`);
-  }
-
-  function insertBlankPage(): void {
-    if (!page) return;
-    const blankPage: DocumentPage = {
-      id: stableId("page"),
-      number: currentPageIndex + 2,
-      width: page.width,
-      height: page.height,
-      rotation: 0,
-      sourceKind: "native",
-      objects: [],
-      nativeTextCount: 0,
-      imageCount: 0,
-      analysisStatus: "ready",
-    };
-    const nextIndex = currentPageIndex + 1;
-    commit({ id: stableId("op"), type: "create", targetId: blankPage.id, pageId: blankPage.id, at: new Date().toISOString(), pageSnapshot: blankPage, pageAfterIndex: nextIndex, label: "Inserted blank page" });
-    setCurrentPageIndex(nextIndex);
-    setSelectedId(null);
-    setNotice("Blank page inserted after the current page.");
-  }
-
-  function duplicateCurrentPage(): void {
-    if (!page) return;
-    const cloneId = stableId("page");
-    const duplicate: DocumentPage = {
-      ...structuredClone(page),
-      id: cloneId,
-      number: currentPageIndex + 2,
-      objects: page.objects.map((object) => ({ ...structuredClone(object), id: stableId(object.type), pageId: cloneId })),
-    };
-    const nextIndex = currentPageIndex + 1;
-    commit({ id: stableId("op"), type: "create", targetId: duplicate.id, pageId: duplicate.id, at: new Date().toISOString(), pageSnapshot: duplicate, pageAfterIndex: nextIndex, label: "Duplicated page" });
-    setCurrentPageIndex(nextIndex);
-    setSelectedId(null);
-    setNotice("Page duplicated. It will be included in the downloaded PDF.");
-  }
-
-  function deleteCurrentPage(): void {
-    if (documentModel.pages.length === 1) {
-      setNotice("A document must keep at least one page.");
-      return;
-    }
-    const index = currentPageIndex;
-    commit({ id: stableId("op"), type: "delete", targetId: page.id, pageId: page.id, at: new Date().toISOString(), pageSnapshot: page, pageBeforeIndex: index, label: "Deleted page" });
-    setCurrentPageIndex(Math.max(0, index - 1));
-    setSelectedId(null);
-    setNotice("Page deleted. Use Undo to restore it.");
-  }
-
-  function moveCurrentPage(direction: -1 | 1): void {
-    const targetIndex = currentPageIndex + direction;
-    if (targetIndex < 0 || targetIndex >= documentModel.pages.length) return;
-    commit({ id: stableId("op"), type: "reorder", targetId: page.id, pageId: page.id, at: new Date().toISOString(), pageBeforeIndex: currentPageIndex, pageAfterIndex: targetIndex, label: "Reordered page" });
-    setCurrentPageIndex(targetIndex);
-    setSelectedId(null);
-    setNotice("Page order updated. The downloaded PDF will use this order.");
-  }
-
   function deleteSelected(): void {
     if (!selected) return;
     commit({ id: stableId("op"), type: "delete", targetId: selected.id, pageId: selected.pageId, at: new Date().toISOString(), before: selected, label: `Deleted ${objectLabel(selected)}` });
@@ -364,7 +226,7 @@ export default function Home() {
     setNotice("Object moved. Use Undo to restore its original position.");
   }
 
-  function resizeObject(object: TextBlock | AnnotationObject, bbox: Rect): void {
+  function resizeObject(object: TextBlock, bbox: Rect): void {
     if (object.bbox.width === bbox.width && object.bbox.height === bbox.height) return;
     commit({
       id: stableId("op"),
@@ -526,7 +388,7 @@ export default function Home() {
       <section className="tool-row" aria-label="Document tools">
         <div className="tool-list">
           {tools.map((tool) => (
-            <button key={tool.id} className={`tool-button ${activeTool === tool.id ? "is-active" : ""}`} onClick={() => tool.id === "text" ? addText() : tool.id === "highlight" ? addAnnotation("highlight") : tool.id === "comment" ? addAnnotation("comment") : tool.id === "redact" ? addAnnotation("redaction") : setActiveTool(tool.id)} aria-pressed={activeTool === tool.id}>
+            <button key={tool.id} className={`tool-button ${activeTool === tool.id ? "is-active" : ""}`} onClick={() => tool.id === "text" ? addText() : setActiveTool(tool.id)} aria-pressed={activeTool === tool.id}>
               <span>{tool.mark}</span>{tool.label}
             </button>
           ))}
@@ -558,7 +420,7 @@ export default function Home() {
               </button>
             ))}
           </div>
-          <button className="add-page" onClick={insertBlankPage}>＋ Insert blank page</button>
+          <button className="add-page" onClick={() => setNotice("Page creation is queued for the reconstruction worker; native page reordering remains non-destructive.")}>＋ Add page</button>
         </aside>
 
         <section className="canvas-zone" aria-label="Editable PDF canvas">
@@ -590,7 +452,7 @@ export default function Home() {
                   onTextCommit={(value, bbox) => object.type === "text" && updateSelected({ text: value, ...detectTextMeta(value), ...(bbox ? { bbox } : {}) }, "Edited text")}
                   onEditEnd={() => setInlineEditing(null)}
                   onMove={(bbox) => moveObject(object, bbox)}
-                  onResize={(bbox) => (object.type === "text" || object.type === "annotation") && resizeObject(object, bbox)}
+                  onResize={(bbox) => object.type === "text" && resizeObject(object, bbox)}
                   editing={inlineEditing === object.id}
                 />
               ))}
@@ -601,13 +463,12 @@ export default function Home() {
 
         <aside className="inspector" aria-label="Document inspector">
           <nav className="inspector-tabs" aria-label="Inspector sections">
-            {(["properties", "layers", "review", "search", "organize"] as Panel[]).map((panel) => <button key={panel} className={activePanel === panel ? "is-active" : ""} onClick={() => setActivePanel(panel)}>{panel}</button>)}
+            {(["properties", "layers", "review", "search"] as Panel[]).map((panel) => <button key={panel} className={activePanel === panel ? "is-active" : ""} onClick={() => setActivePanel(panel)}>{panel}</button>)}
           </nav>
-          {activePanel === "properties" && <PropertiesPanel selected={selected} onTextChange={(text) => selected?.type === "text" && updateSelected({ text, ...detectTextMeta(text), ...(selected.source === "user" ? { bbox: fitTextBounds(text, selected.bbox, page.width, page.height, selected.style, selected.bbox) } : {}) }, "Edited text")} onAnnotationChange={(changes, label) => updateAnnotation(changes, label)} onStyleChange={(style) => selected?.type === "text" && updateSelected({ style: { ...selected.style, ...style } }, "Changed text style")} onRotationChange={(rotation) => selected?.type === "text" && updateSelected({ rotation: clamp(rotation, -180, 180) }, "Rotated text")} onDirectionChange={(direction) => selected?.type === "text" && updateSelected({ direction }, "Changed paragraph direction")} onDelete={deleteSelected} onDuplicate={duplicateSelected} />}
+          {activePanel === "properties" && <PropertiesPanel selected={selected} onTextChange={(text) => selected?.type === "text" && updateSelected({ text, ...detectTextMeta(text), ...(selected.source === "user" ? { bbox: fitTextBounds(text, selected.bbox, page.width, page.height, selected.style, selected.bbox) } : {}) }, "Edited text")} onStyleChange={(style) => selected?.type === "text" && updateSelected({ style: { ...selected.style, ...style } }, "Changed text style")} onRotationChange={(rotation) => selected?.type === "text" && updateSelected({ rotation: clamp(rotation, -180, 180) }, "Rotated text")} onDirectionChange={(direction) => selected?.type === "text" && updateSelected({ direction }, "Changed paragraph direction")} onDelete={deleteSelected} onDuplicate={duplicateSelected} />}
           {activePanel === "layers" && <LayersPanel page={page} selectedId={selectedId} onSelect={setSelectedId} />}
           {activePanel === "review" && <ReviewPanel page={page} readiness={exportReadiness} />}
           {activePanel === "search" && <SearchPanel search={search} setSearch={setSearch} document={documentModel} onReplaceAll={replaceAllMatches} onSelect={(id) => { setSelectedId(id); const located = findObject(documentModel, id); if (located) setCurrentPageIndex(located.pageIndex); }} />}
-          {activePanel === "organize" && <OrganizePanel pageNumber={page.number} pageCount={documentModel.pages.length} onMoveEarlier={() => moveCurrentPage(-1)} onMoveLater={() => moveCurrentPage(1)} onDuplicate={duplicateCurrentPage} onInsertBlank={insertBlankPage} onDelete={deleteCurrentPage} />}
         </aside>
       </section>
 
@@ -640,7 +501,6 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     transform: object.type === "text" && object.rotation ? `rotate(${object.rotation}deg)` : undefined,
     transformOrigin: "top left",
   };
-  if (object.type === "annotation") return <AnnotationMarkup object={object} pageWidth={pageWidth} pageHeight={pageHeight} selected={selected} onSelect={onSelect} onMove={onMove} onResize={onResize} />;
   if (object.type === "table") {
     return <button className={`semantic-object table-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""}`} style={style} onClick={onSelect} aria-label="Recognized table"><span className="table-object-label">{object.rows} × {object.columns} table · {formatConfidence(object.confidence)}</span></button>;
   }
@@ -738,76 +598,6 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     {editing ? <textarea autoFocus wrap="off" value={draftText} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => { const value = event.target.value; setDraftText(value); if (object.source === "user") setDraftBbox(fitTextBounds(value, object.bbox, pageWidth, pageHeight, object.style, object.bbox)); }} onBlur={finishEditing} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDraftText(object.text); setDraftBbox(null); onEditEnd(); } }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent || isDragging ? object.text : ""}</span>}
     {selected && !editing && <button className="text-resize-handle" aria-label="Resize text box" title="Drag to resize text box" onClick={(event) => event.stopPropagation()} onPointerDown={startResizing} onPointerMove={updateResizing} onPointerUp={finishResizing} onPointerCancel={cancelResizing} />}
     {selected && !replacementPreview && <span className="object-source">{object.source === "native-pdf" ? "native" : object.source}</span>}
-  </div>;
-}
-
-function AnnotationMarkup({ object, pageWidth, pageHeight, selected, onSelect, onMove, onResize }: { object: AnnotationObject; pageWidth: number; pageHeight: number; selected: boolean; onSelect: () => void; onMove: (bbox: Rect) => void; onResize: (bbox: Rect) => void }) {
-  const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
-  const [resizeBbox, setResizeBbox] = useState<Rect | null>(null);
-  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; startBbox: Rect; paper: DOMRect; offset: { x: number; y: number } } | null>(null);
-  const resizeRef = useRef<{ pointerId: number; startX: number; startY: number; startBbox: Rect; paper: DOMRect; bbox: Rect } | null>(null);
-  const bbox = resizeBbox ?? object.bbox;
-  const style: CSSProperties = {
-    left: `${((bbox.x + (dragOffset?.x ?? 0)) / pageWidth) * 100}%`,
-    top: `${((bbox.y + (dragOffset?.y ?? 0)) / pageHeight) * 100}%`,
-    width: `${(bbox.width / pageWidth) * 100}%`,
-    height: `${(bbox.height / pageHeight) * 100}%`,
-    "--annotation-color": object.color,
-    "--annotation-opacity": object.opacity,
-  } as CSSProperties;
-  const startDragging = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-    const paper = event.currentTarget.parentElement?.getBoundingClientRect();
-    if (!paper) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startBbox: { ...object.bbox }, paper, offset: { x: 0, y: 0 } };
-  };
-  const updateDragging = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const nextX = clamp(drag.startBbox.x + ((event.clientX - drag.startX) / drag.paper.width) * pageWidth, 0, Math.max(0, pageWidth - drag.startBbox.width));
-    const nextY = clamp(drag.startBbox.y + ((event.clientY - drag.startY) / drag.paper.height) * pageHeight, 0, Math.max(0, pageHeight - drag.startBbox.height));
-    drag.offset = { x: nextX - drag.startBbox.x, y: nextY - drag.startBbox.y };
-    setDragOffset(drag.offset);
-  };
-  const finishDragging = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    dragRef.current = null;
-    setDragOffset(null);
-    if (Math.abs(drag.offset.x) >= 0.5 || Math.abs(drag.offset.y) >= 0.5) onMove({ ...drag.startBbox, x: drag.startBbox.x + drag.offset.x, y: drag.startBbox.y + drag.offset.y });
-  };
-  const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-    const paper = event.currentTarget.closest(".paper")?.getBoundingClientRect();
-    if (!paper) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    resizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startBbox: { ...object.bbox }, paper, bbox: { ...object.bbox } };
-  };
-  const updateResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    const resize = resizeRef.current;
-    if (!resize || resize.pointerId !== event.pointerId) return;
-    const minHeight = object.annotationKind === "comment" ? 42 : 14;
-    resize.bbox = {
-      ...resize.startBbox,
-      width: clamp(resize.startBbox.width + ((event.clientX - resize.startX) / resize.paper.width) * pageWidth, 28, Math.max(28, pageWidth - resize.startBbox.x)),
-      height: clamp(resize.startBbox.height + ((event.clientY - resize.startY) / resize.paper.height) * pageHeight, minHeight, Math.max(minHeight, pageHeight - resize.startBbox.y)),
-    };
-    setResizeBbox(resize.bbox);
-  };
-  const finishResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    const resize = resizeRef.current;
-    if (!resize || resize.pointerId !== event.pointerId) return;
-    resizeRef.current = null;
-    setResizeBbox(null);
-    onResize(resize.bbox);
-  };
-  return <div className={`semantic-object annotation-object annotation-${object.annotationKind} ${selected ? "is-selected" : ""} ${dragOffset ? "is-dragging" : ""}`} style={style} onClick={(event) => { event.stopPropagation(); onSelect(); }} onPointerDown={startDragging} onPointerMove={updateDragging} onPointerUp={finishDragging} onPointerCancel={() => { dragRef.current = null; setDragOffset(null); }} role="button" tabIndex={0} aria-label={objectLabel(object)}>
-    {object.annotationKind === "comment" && <span className="annotation-comment-text">{object.text || "Comment"}</span>}
-    {object.annotationKind === "redaction" && <span className="annotation-redaction-text">{object.text || "REDACTED"}</span>}
-    {selected && <button className="annotation-resize-handle" aria-label={`Resize ${object.annotationKind}`} title="Drag to resize" onClick={(event) => event.stopPropagation()} onPointerDown={startResize} onPointerMove={updateResize} onPointerUp={finishResize} onPointerCancel={() => { resizeRef.current = null; setResizeBbox(null); }} />}
   </div>;
 }
 
@@ -934,20 +724,8 @@ function SelectionRuler({ object, pageWidth, pageHeight }: { object: PageObject;
   return <div className="selection-ruler" style={{ left: `${(object.bbox.x / pageWidth) * 100}%`, top: `${(object.bbox.y / pageHeight) * 100}%` }}><span>{Math.round(object.bbox.x)}, {Math.round(object.bbox.y)}</span></div>;
 }
 
-function PropertiesPanel({ selected, onTextChange, onAnnotationChange, onStyleChange, onRotationChange, onDirectionChange, onDelete, onDuplicate }: { selected: PageObject | null; onTextChange: (value: string) => void; onAnnotationChange: (changes: Partial<AnnotationObject>, label: string) => void; onStyleChange: (value: Partial<TextStyle>) => void; onRotationChange: (value: number) => void; onDirectionChange: (direction: TextDirection) => void; onDelete: () => void; onDuplicate: () => void }) {
+function PropertiesPanel({ selected, onTextChange, onStyleChange, onRotationChange, onDirectionChange, onDelete, onDuplicate }: { selected: PageObject | null; onTextChange: (value: string) => void; onStyleChange: (value: Partial<TextStyle>) => void; onRotationChange: (value: number) => void; onDirectionChange: (direction: TextDirection) => void; onDelete: () => void; onDuplicate: () => void }) {
   if (!selected) return <div className="empty-inspector"><span className="empty-glyph">⌁</span><strong>Select an object</strong><p>Text, tables, form fields, and recognized graphics keep their own semantic metadata.</p></div>;
-  if (selected.type === "annotation") return <div className="object-inspector">
-    <div className="property-heading"><div><span className="eyebrow">Review markup</span><h2>{selected.annotationKind === "redaction" ? "Redaction" : selected.annotationKind === "highlight" ? "Highlight" : "Comment"}</h2></div><span className="source-pill">user</span></div>
-    {selected.annotationKind === "comment" && <label className="field-label">Comment <textarea value={selected.text ?? ""} onChange={(event) => onAnnotationChange({ text: event.target.value }, "Edited comment")} /></label>}
-    {selected.annotationKind === "redaction" && <label className="field-label">Redaction label <input value={selected.text ?? ""} onChange={(event) => onAnnotationChange({ text: event.target.value }, "Edited redaction label")} /></label>}
-    <div className="field-grid">
-      <label className="field-label">Color <input aria-label="Annotation color" type="color" value={selected.color} onChange={(event) => onAnnotationChange({ color: event.target.value }, "Changed annotation color")} /></label>
-      {selected.annotationKind !== "redaction" && <label className="field-label">Opacity <input type="number" min="0.1" max="1" step="0.1" value={selected.opacity} onChange={(event) => onAnnotationChange({ opacity: clamp(Number(event.target.value) || 1, 0.1, 1) }, "Changed annotation opacity")} /></label>}
-    </div>
-    <div className="confidence-card"><span>Export behavior</span><strong>Flattened</strong><i><b style={{ width: "100%" }} /></i></div>
-    <p className="annotation-help">{selected.annotationKind === "redaction" ? "Export produces a new flattened PDF, so the covered source content is not present in the downloaded file." : "Markup is preserved visually in the downloaded PDF."}</p>
-    <div className="inspector-buttons"><button onClick={onDuplicate}>Duplicate</button><button className="danger" onClick={onDelete}>Delete</button></div>
-  </div>;
   if (selected.type !== "text") return <div className="object-inspector"><span className="eyebrow">{selected.type.replace("-", " ")}</span><h2>{objectLabel(selected)}</h2><div className="confidence-card"><span>Recognition confidence</span><strong>{formatConfidence(selected.confidence)}</strong><i><b style={{ width: `${selected.confidence * 100}%` }} /></i></div><dl><div><dt>Source</dt><dd>{selected.source}</dd></div><div><dt>Bounds</dt><dd>{Math.round(selected.bbox.width)} × {Math.round(selected.bbox.height)} pt</dd></div><div><dt>Direction</dt><dd>{selected.direction}</dd></div></dl><div className="inspector-buttons"><button onClick={onDuplicate}>Duplicate</button><button className="danger" onClick={onDelete}>Delete</button></div></div>;
   return <div className="object-inspector">
     <div className="property-heading"><div><span className="eyebrow">Text block</span><h2>Content & type</h2></div><span className={`source-pill ${selected.source}`}>{selected.source}</span></div>
@@ -992,20 +770,5 @@ function SearchPanel({ search, setSearch, document, onReplaceAll, onSelect }: { 
     <p className="search-hint">Search and replace use semantic text, preserve mixed Arabic and English direction, and can be undone one change at a time.</p>
     {results.map(({ page, object }) => <button className="search-result" key={object.id} onClick={() => onSelect(object.id)}><small>Page {page} · {object.language} · {object.direction}</small><strong>{object.text}</strong></button>)}
     {search && !results.length && <div className="no-results">No semantic text matches.</div>}
-  </div>;
-}
-
-function OrganizePanel({ pageNumber, pageCount, onMoveEarlier, onMoveLater, onDuplicate, onInsertBlank, onDelete }: { pageNumber: number; pageCount: number; onMoveEarlier: () => void; onMoveLater: () => void; onDuplicate: () => void; onInsertBlank: () => void; onDelete: () => void }) {
-  return <div className="organize-panel">
-    <div className="panel-heading"><div><span className="eyebrow">Page {pageNumber} of {pageCount}</span><h2>Organize pages</h2></div></div>
-    <p className="organize-help">Arrange, duplicate, or remove pages. Page changes are included when you export the edited PDF.</p>
-    <div className="organize-grid">
-      <button disabled={pageNumber === 1} onClick={onMoveEarlier}>← Move earlier</button>
-      <button disabled={pageNumber === pageCount} onClick={onMoveLater}>Move later →</button>
-      <button onClick={onDuplicate}>Duplicate page</button>
-      <button onClick={onInsertBlank}>Insert blank</button>
-      <button className="organize-danger" disabled={pageCount === 1} onClick={onDelete}>Delete page</button>
-    </div>
-    <div className="organize-note"><strong>Professional workflow</strong><span>Page order stays local to your device until you export.</span></div>
   </div>;
 }
