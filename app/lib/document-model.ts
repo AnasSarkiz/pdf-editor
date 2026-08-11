@@ -1,6 +1,5 @@
 export type ObjectType =
   | "text"
-  | "annotation"
   | "table"
   | "image"
   | "vector"
@@ -68,20 +67,6 @@ export interface TextBlock extends SemanticObjectBase {
   editable: boolean;
 }
 
-export type AnnotationKind = "highlight" | "comment" | "redaction";
-
-/**
- * Review markup is kept independently from source text so it can be moved,
- * resized, and flattened safely when the edited document is exported.
- */
-export interface AnnotationObject extends SemanticObjectBase {
-  type: "annotation";
-  annotationKind: AnnotationKind;
-  color: string;
-  opacity: number;
-  text?: string;
-}
-
 export interface TableCell {
   id: string;
   row: number;
@@ -123,7 +108,6 @@ export interface FormFieldObject extends SemanticObjectBase {
 
 export type PageObject =
   | TextBlock
-  | AnnotationObject
   | TableObject
   | ImageObject
   | VectorObject
@@ -160,11 +144,6 @@ export interface EditOperation {
   at: string;
   before?: Partial<PageObject>;
   after?: Partial<PageObject>;
-  /** A complete page snapshot enables undoable duplicate, insert, and delete actions. */
-  pageSnapshot?: DocumentPage;
-  /** Page indices are stored directly for undoable reordering. */
-  pageBeforeIndex?: number;
-  pageAfterIndex?: number;
   label: string;
 }
 
