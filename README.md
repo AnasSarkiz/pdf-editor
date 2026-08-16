@@ -15,16 +15,8 @@ The editor keeps document work local to the browser: it opens a PDF, builds an e
 - Select, edit, add, duplicate, move, and resize text blocks.
 - Change font, size, weight, italic styling, colour, alignment, rotation, line height, letter spacing, and paragraph direction.
 - Search and replace semantic Arabic or English text.
-- Add movable and resizable highlights, comments, and redactions.
 - Review OCR/extraction confidence and inspect the page layer stack.
-- Undo and redo object edits and page organization actions.
-
-### Organize pages
-
-- Insert blank pages.
-- Move a page earlier or later in the document.
-- Duplicate or delete pages.
-- Keep the revised page order when exporting.
+- Undo and redo text/object edits.
 
 ### OCR and language support
 
@@ -35,23 +27,21 @@ The editor keeps document work local to the browser: it opens a PDF, builds an e
 ### Export
 
 - **Safe native export:** untouched PDFs and compatible newly-added Latin text retain a normal PDF export path.
-- **Visual fallback export:** edited native text, Arabic reconstruction, annotations, redactions, and page structure changes export as a high-quality flattened PDF. This ensures the visible result is preserved instead of silently losing an edit.
-- **Redaction export:** redactions are part of the flattened output, so the downloaded PDF does not retain the original underlying text stream.
+- **Visual fallback export:** edited native text and Arabic reconstruction export as a high-quality flattened PDF. This ensures the visible result is preserved instead of silently losing an edit.
 
 ## How to use it
 
 1. Select **Open PDF** and choose a PDF file.
 2. Use **Select** to edit existing text, or choose **Text** to add a new text box.
-3. Use **Highlight**, **Comment**, or **Redact** to add review markup. Drag the object into place and resize it from its handle.
-4. Open the **Organize** inspector tab to reorder, duplicate, insert, or delete pages.
-5. Select **Export PDF**. The browser downloads an `-edited.pdf` file.
+3. Use the inspector to change text formatting, direction, and spacing.
+4. Select **Export PDF**. The browser downloads an `-edited.pdf` file.
 
 ## Privacy and security
 
 - PDF parsing, rendering, text extraction, and OCR run in the browser.
 - Page imagery and scanned-page OCR input are not uploaded by this application.
 - OCR language models may download to the browser the first time OCR is used.
-- The current redaction workflow creates a flattened output rather than rewriting low-level PDF content streams. It is appropriate for the downloaded visual document, but it is **not yet a compliance-certified redaction system**. Legal, regulatory, or high-risk redactions should wait for the planned verified sanitization worker.
+- There is no permanent redaction capability yet. Do not use visual text cover-ups to redact legal, regulatory, or high-risk information; that requires the planned verified sanitization worker.
 
 ## Development
 
@@ -69,7 +59,7 @@ bun run build
 - PDF.js handles browser-side PDF reading, native text extraction, and page rendering.
 - Tesseract.js provides local Arabic and English OCR for scanned documents.
 - pdf-lib produces compatible PDF output and the flattened visual fallback.
-- The editor uses a semantic document model so text, tables, forms, annotations, source confidence, language, and direction are independently represented.
+- The editor uses a semantic document model so text, tables, forms, source confidence, language, and direction are independently represented.
 
 ## Roadmap
 
@@ -77,8 +67,8 @@ The next professional modules are:
 
 1. Fillable form creation and AcroForm appearance regeneration.
 2. Signature placement and signature-request workflows.
-3. Page rotation, drag-and-drop thumbnail reordering, merge, split, crop, and compression.
-4. Image replace/crop/rotate, watermarking, page numbering, and document metadata editing.
+3. Review annotations, comment threads, permanent redaction, page rotation, and drag-and-drop thumbnail reordering.
+4. Merge, split, crop, compression, image replace/crop/rotate, watermarking, page numbering, and document metadata editing.
 5. Password protection, server-verified sanitizing redaction, and standards-compliant digital signatures.
 6. Persistent local drafts, collaboration, cloud-storage integrations, and conversion to/from Office formats.
 
