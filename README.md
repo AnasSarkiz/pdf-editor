@@ -1,26 +1,59 @@
 # PDF Editor
 
-PDF Editor is a web-based PDF editor proof of concept built around a normalized, editable document model rather than visual page overlays. It is designed for Arabic, English, and mixed-direction documents.
+A browser-based PDF editor for Arabic, English, and mixed-direction documents.
 
-## What this build demonstrates
+The editor keeps document work local to the browser: it opens a PDF, builds an editable semantic model, lets the user update text and markup, and downloads an edited PDF without requiring a file upload service.
 
-- Browser-side PDF signature validation, parsing, native text extraction, form-field detection, image-operation counting, and page rendering with PDF.js.
-- Stable semantic objects carrying bounds, transformation, source, confidence, language, and direction metadata.
-- Unicode-aware Arabic/English editing surface, inline text editing, selection, add/delete/duplicate text, operation-based undo/redo, semantic search, and confidence review.
-- Valid PDF export for safe paths, with explicit holds where an export would otherwise degrade fidelity.
-- Local Arabic + English OCR for scanned pages, rendered at 300 dpi and kept in the browser; recognition blocks carry confidence for review.
+**Live editor:** [Open PDF Editor](https://naskh-studio-pdf-editor.anassoftwaredev.chatgpt.site)
+**Repository:** [github.com/AnasSarkiz/pdf-editor](https://github.com/AnasSarkiz/pdf-editor)
 
-## Guardrail
+## What works today
 
-This browser proof of concept will not paint over existing native text or rasterize a whole page to simulate editing. Changes that need full page reconstruction, including newly created Arabic text, are held until the shaping/reconstruction worker is available.
+### Edit and review
 
-## Documentation
+- Open portrait and landscape PDFs up to 100 MB.
+- Select, edit, add, duplicate, move, and resize text blocks.
+- Change font, size, weight, italic styling, colour, alignment, rotation, line height, letter spacing, and paragraph direction.
+- Search and replace semantic Arabic or English text.
+- Add movable and resizable highlights, comments, and redactions.
+- Review OCR/extraction confidence and inspect the page layer stack.
+- Undo and redo object edits and page organization actions.
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Dependency and licence evaluation](docs/DEPENDENCIES.md)
-- [Known limitations, fixture plan, and roadmap](docs/KNOWN_LIMITATIONS.md)
+### Organize pages
 
-## Commands
+- Insert blank pages.
+- Move a page earlier or later in the document.
+- Duplicate or delete pages.
+- Keep the revised page order when exporting.
+
+### OCR and language support
+
+- Extract native PDF text where it is available.
+- Run local Arabic + English OCR on image-only scans at 300 dpi.
+- Preserve Unicode text, paragraph direction, and mixed Arabic/English content in the editing surface.
+
+### Export
+
+- **Safe native export:** untouched PDFs and compatible newly-added Latin text retain a normal PDF export path.
+- **Visual fallback export:** edited native text, Arabic reconstruction, annotations, redactions, and page structure changes export as a high-quality flattened PDF. This ensures the visible result is preserved instead of silently losing an edit.
+- **Redaction export:** redactions are part of the flattened output, so the downloaded PDF does not retain the original underlying text stream.
+
+## How to use it
+
+1. Select **Open PDF** and choose a PDF file.
+2. Use **Select** to edit existing text, or choose **Text** to add a new text box.
+3. Use **Highlight**, **Comment**, or **Redact** to add review markup. Drag the object into place and resize it from its handle.
+4. Open the **Organize** inspector tab to reorder, duplicate, insert, or delete pages.
+5. Select **Export PDF**. The browser downloads an `-edited.pdf` file.
+
+## Privacy and security
+
+- PDF parsing, rendering, text extraction, and OCR run in the browser.
+- Page imagery and scanned-page OCR input are not uploaded by this application.
+- OCR language models may download to the browser the first time OCR is used.
+- The current redaction workflow creates a flattened output rather than rewriting low-level PDF content streams. It is appropriate for the downloaded visual document, but it is **not yet a compliance-certified redaction system**. Legal, regulatory, or high-risk redactions should wait for the planned verified sanitization worker.
+
+## Development
 
 ```bash
 npm install
@@ -30,4 +63,23 @@ bun test
 bun run build
 ```
 
-Scanned pages use a browser-local Tesseract worker with Arabic and English high-accuracy models. The first scanned page can take longer while the language models download; page imagery is never uploaded. Any future server-assisted analysis must make consent, retention, and encryption choices explicit.
+## Technical notes
+
+- React + Vinext client application.
+- PDF.js handles browser-side PDF reading, native text extraction, and page rendering.
+- Tesseract.js provides local Arabic and English OCR for scanned documents.
+- pdf-lib produces compatible PDF output and the flattened visual fallback.
+- The editor uses a semantic document model so text, tables, forms, annotations, source confidence, language, and direction are independently represented.
+
+## Roadmap
+
+The next professional modules are:
+
+1. Fillable form creation and AcroForm appearance regeneration.
+2. Signature placement and signature-request workflows.
+3. Page rotation, drag-and-drop thumbnail reordering, merge, split, crop, and compression.
+4. Image replace/crop/rotate, watermarking, page numbering, and document metadata editing.
+5. Password protection, server-verified sanitizing redaction, and standards-compliant digital signatures.
+6. Persistent local drafts, collaboration, cloud-storage integrations, and conversion to/from Office formats.
+
+See [architecture](docs/ARCHITECTURE.md), [dependency and licence evaluation](docs/DEPENDENCIES.md), and [known limitations](docs/KNOWN_LIMITATIONS.md) for implementation detail.
