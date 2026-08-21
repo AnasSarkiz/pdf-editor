@@ -131,6 +131,21 @@ function createPdfByteCopies(buffer: ArrayBuffer): { bytes: Uint8Array; pdfData:
   return { bytes, pdfData: bytes.slice() };
 }
 
+function hasPdfSignature(bytes: Uint8Array): boolean {
+  return bytes.byteLength >= 5
+    && bytes[0] === 0x25
+    && bytes[1] === 0x50
+    && bytes[2] === 0x44
+    && bytes[3] === 0x46
+    && bytes[4] === 0x2d;
+}
+
+function assertPdfSignature(bytes: Uint8Array): void {
+  if (!hasPdfSignature(bytes)) {
+    throw new Error("The file signature is not a PDF. Choose a valid PDF file.");
+  }
+}
+
 interface NativeTextItem {
   str: string;
   dir: string;
@@ -244,15 +259,110 @@ interface NativeAnnotation {
   rect: [number, number, number, number];
 }
 
-async function getPdfJs(): Promise<PdfJsModule> {
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  if (!pdfjs.GlobalWorkerOptions.workerSrc) {
-    pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-      "pdfjs-dist/legacy/build/pdf.worker.mjs",
-      import.meta.url,
-    ).toString();
+interface AssetWarmResponse {
+  ok: boolean;
+  status?: number;
+  arrayBuffer: () => Promise<ArrayBuffer>;
+}
+
+type AssetFetch = (input: string, init?: RequestInit) => Promise<AssetWarmResponse>;
+
+function pdfWorkerAssetUrl(): string {
+  return new URL(
+    "pdfjs-dist/legacy/build/pdf.worker.min.mjs",
+    import.meta.url,
+  ).toString();
+}
+
+let pdfJsModulePromise: Promise<PdfJsModule> | undefined;
+
+function getPdfJs(): Promise<PdfJsModule> {
+  if (pdfJsModulePromise) return pdfJsModulePromise;
+  pdfJsModulePromise = import("pdfjs-dist/legacy/build/pdf.mjs")
+    .then((pdfjs) => {
+      if (!pdfjs.GlobalWorkerOptions.workerSrc) {
+        pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerAssetUrl();
+      }
+      return pdfjs;
+    })
+    .catch((error: unknown) => {
+      // A failed speculative preload must not permanently poison a later
+      // user-initiated import.
+      pdfJsModulePromise = undefined;
+      throw error;
+    });
+  return pdfJsModulePromise;
+}
+
+async function warmSameOriginAsset(
+  assetHref: string,
+  pageHref: string,
+  fetchAsset: AssetFetch,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const pageUrl = new URL(pageHref);
+  const assetUrl = new URL(assetHref, pageUrl);
+  if (!/^https?:$/.test(assetUrl.protocol) || assetUrl.origin !== pageUrl.origin) return false;
+  const response = await fetchAsset(assetUrl.href, {
+    cache: "force-cache",
+    credentials: "same-origin",
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`The PDF worker preload returned HTTP ${response.status ?? "error"}.`);
   }
-  return pdfjs;
+  // Fetch resolves after headers. Consume the body so the complete worker is
+  // available to the browser cache when PDF.js constructs its module worker.
+  await response.arrayBuffer();
+  return true;
+}
+
+let pdfEnginePreloadPromise: Promise<void> | undefined;
+let pdfWorkerAssetWarmed = false;
+
+/** Best-effort cold-start warmup; importing a PDF never depends on its result. */
+export function preloadPdfEngine(): Promise<void> {
+  if (pdfEnginePreloadPromise) return pdfEnginePreloadPromise;
+
+  // Start both cold downloads before awaiting either. On a constrained mobile
+  // connection these are the two dominant first-import transfers.
+  const runtimePromise = withStageTimeout(
+    getPdfJs(),
+    IMPORT_TIMEOUT_MS.engine,
+    "preloading the PDF engine",
+  );
+  let workerPromise: Promise<boolean> = Promise.resolve(false);
+  if (
+    !pdfWorkerAssetWarmed
+    && typeof window !== "undefined"
+    && typeof window.location?.href === "string"
+    && typeof fetch === "function"
+  ) {
+    const controller = typeof AbortController === "function" ? new AbortController() : undefined;
+    workerPromise = withStageTimeout(
+      warmSameOriginAsset(
+        pdfWorkerAssetUrl(),
+        window.location.href,
+        (input, init) => fetch(input, init),
+        controller?.signal,
+      ),
+      IMPORT_TIMEOUT_MS.documentOpen,
+      "preloading the PDF worker",
+      () => controller?.abort(),
+    );
+  }
+
+  const preload = Promise.allSettled([runtimePromise, workerPromise])
+    .then((results) => {
+      const workerResult = results[1];
+      if (workerResult.status === "fulfilled" && workerResult.value) {
+        pdfWorkerAssetWarmed = true;
+      }
+    });
+  pdfEnginePreloadPromise = preload.finally(() => {
+    pdfEnginePreloadPromise = undefined;
+  });
+  return pdfEnginePreloadPromise;
 }
 
 let retainedPdfFontFaces = new Set<FontFace>();
@@ -1269,6 +1379,8 @@ export const pdfCoreTesting = {
   renderedTextColor,
   boundedRenderScale,
   createPdfByteCopies,
+  hasPdfSignature,
+  warmSameOriginAsset,
   nativeFontLoadRequests,
   loadNativeTextFonts,
   withStageTimeout,
@@ -1609,16 +1721,19 @@ async function refineNativeTextBlocks(
 }
 
 export interface PdfLoadProgress {
-  phase: "opening" | "extracting" | "recognizing" | "rendering" | "ready";
+  phase: "reading" | "loading-engine" | "opening" | "extracting" | "recognizing" | "rendering" | "ready";
   completed: number;
   total: number;
 }
 
 export async function importPdf(file: File, onProgress?: (progress: PdfLoadProgress) => void): Promise<{ document: EditableDocument; bytes: Uint8Array }> {
-  onProgress?.({ phase: "opening", completed: 0, total: 1 });
+  onProgress?.({ phase: "reading", completed: 0, total: 1 });
   const fileBuffer = await withStageTimeout(file.arrayBuffer(), IMPORT_TIMEOUT_MS.fileRead, "reading the PDF file");
   const { bytes, pdfData } = createPdfByteCopies(fileBuffer);
+  assertPdfSignature(bytes);
+  onProgress?.({ phase: "loading-engine", completed: 0, total: 1 });
   const pdfjs = await withStageTimeout(getPdfJs(), IMPORT_TIMEOUT_MS.engine, "loading the PDF engine");
+  onProgress?.({ phase: "opening", completed: 0, total: 1 });
   const renderLimits = currentRenderLimits();
   let loadingTask: PdfDocumentLoadingTask | undefined;
   let destroyTask: Promise<void> | undefined;

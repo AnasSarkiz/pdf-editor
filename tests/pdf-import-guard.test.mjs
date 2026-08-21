@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pdfCoreTesting } from "../app/lib/pdf-core";
+import { importPdf, pdfCoreTesting, preloadPdfEngine } from "../app/lib/pdf-core";
 
 function fontBlock(text, fontFamily = "EmbeddedFont") {
   return {
@@ -29,6 +29,67 @@ test("the retained PDF bytes stay intact when PDF.js owns and transfers its copy
   structuredClone(pdfData.buffer, { transfer: [pdfData.buffer] });
   assert.equal(pdfData.byteLength, 0);
   assert.equal(bytes.byteLength, 5);
+});
+
+test("PDF signature validation uses the already-read full file buffer", async () => {
+  assert.equal(pdfCoreTesting.hasPdfSignature(new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])), true);
+  assert.equal(pdfCoreTesting.hasPdfSignature(new Uint8Array([0x25, 0x50, 0x44, 0x46])), false);
+
+  const phases = [];
+  const invalidFile = {
+    arrayBuffer: async () => new TextEncoder().encode("not a pdf").buffer,
+  };
+  await assert.rejects(
+    importPdf(invalidFile, (progress) => phases.push(progress.phase)),
+    /file signature is not a PDF/i,
+  );
+  assert.deepEqual(phases, ["reading"]);
+});
+
+test("worker preload consumes only a same-origin asset into browser cache", async () => {
+  const requests = [];
+  let bodyConsumed = false;
+  const warmed = await pdfCoreTesting.warmSameOriginAsset(
+    "/assets/pdf.worker.mjs",
+    "https://editor.example/document",
+    async (input, init) => {
+      requests.push({ input, init });
+      return {
+        ok: true,
+        status: 200,
+        async arrayBuffer() {
+          bodyConsumed = true;
+          return new ArrayBuffer(0);
+        },
+      };
+    },
+  );
+
+  assert.equal(warmed, true);
+  assert.equal(bodyConsumed, true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].input, "https://editor.example/assets/pdf.worker.mjs");
+  assert.equal(requests[0].init.cache, "force-cache");
+  assert.equal(requests[0].init.credentials, "same-origin");
+
+  let crossOriginFetches = 0;
+  const skipped = await pdfCoreTesting.warmSameOriginAsset(
+    "https://cdn.example/pdf.worker.mjs",
+    "https://editor.example/document",
+    async () => {
+      crossOriginFetches += 1;
+      throw new Error("cross-origin preload should be skipped");
+    },
+  );
+  assert.equal(skipped, false);
+  assert.equal(crossOriginFetches, 0);
+});
+
+test("PDF engine preload is best-effort and coalesces concurrent callers", async () => {
+  const first = preloadPdfEngine();
+  const second = preloadPdfEngine();
+  assert.equal(first, second);
+  await first;
 });
 
 test("render scale respects both the pixel and maximum-dimension budgets", () => {

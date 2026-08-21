@@ -14,6 +14,27 @@ async function render() {
   );
 }
 
+function mediaRuleBody(css, query) {
+  const start = css.indexOf(query);
+  assert.notEqual(start, -1, `missing ${query}`);
+  const openingBrace = css.indexOf("{", start);
+  assert.notEqual(openingBrace, -1, `missing opening brace for ${query}`);
+  let depth = 1;
+  for (let index = openingBrace + 1; index < css.length; index += 1) {
+    if (css[index] === "{") depth += 1;
+    if (css[index] === "}") depth -= 1;
+    if (depth === 0) return css.slice(openingBrace + 1, index);
+  }
+  assert.fail(`missing closing brace for ${query}`);
+}
+
+function selectorDeclarations(css, selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "s"));
+  assert.ok(match, `missing ${selector} declarations`);
+  return match[1];
+}
+
 test("server-renders the PDF Editor workspace", async () => {
   const response = await render();
   assert.equal(response.status, 200);
@@ -47,4 +68,33 @@ test("keeps starter preview assets out of the finished product", async () => {
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   assert.doesNotMatch(page, /codex-preview|_sites-preview|SkeletonPreview/);
 
+});
+
+test("phone layout clears desktop width floors and keeps primary actions reachable", async () => {
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  const phone = mediaRuleBody(css, "@media (max-width: 600px)");
+  const workspace = selectorDeclarations(phone, ".workspace");
+  const paperWrap = selectorDeclarations(phone, ".paper-wrap");
+  const sidebar = selectorDeclarations(phone, ".page-sidebar");
+  const shell = selectorDeclarations(phone, ".studio-shell");
+  const primaryActions = selectorDeclarations(phone, ".open-button, .export-button");
+
+  assert.doesNotMatch(phone, /minmax\(\s*390px\b/i);
+  assert.doesNotMatch(phone, /min-width\s*:\s*560px\b/i);
+  assert.match(workspace, /grid-template-columns\s*:\s*minmax\(\s*0\s*,\s*1fr\s*\)/i);
+  assert.match(workspace, /grid-template-rows\s*:\s*64px\s+minmax\(\s*0\s*,\s*1fr\s*\)/i);
+  assert.match(paperWrap, /width\s*:\s*100%\s*!important/i);
+  assert.match(paperWrap, /min-width\s*:\s*0\b/i);
+  assert.match(paperWrap, /max-width\s*:\s*100%/i);
+  assert.match(sidebar, /flex-direction\s*:\s*row/i);
+  assert.match(shell, /height\s*:\s*100dvh/i);
+  assert.match(shell, /safe-area-inset-top/i);
+  assert.match(primaryActions, /min-height\s*:\s*42px/i);
+
+  const response = await render();
+  const html = await response.text();
+  assert.match(html, /class="open-button"[^>]*>Open PDF<\/button>/);
+  assert.match(html, /class="export-button"[^>]*>Export PDF/);
+  assert.match(html, /class="page-sidebar" aria-label="Pages"/);
+  assert.match(html, /class="canvas-zone" aria-label="Editable PDF canvas"/);
 });

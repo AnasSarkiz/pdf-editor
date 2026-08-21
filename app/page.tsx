@@ -6,7 +6,7 @@ import { exportFlattenedPdf } from "./lib/flattened-export";
 import type { DocumentPage, EditableDocument, EditOperation, PageObject, Rect, TextBlock, TextDirection, TextStyle } from "./lib/document-model";
 import { createDemoDocument, defaultTextStyle, detectTextMeta, identityMatrix, stableId } from "./lib/document-model";
 import { canSafelyMutateText, canSafelyPlaceText, isCanvasBackedText, isTextReplacementPreview, needsSourceCanvasReplacement, shouldRenderTextContent } from "./lib/editor-visibility";
-import { importPdf, type PdfLoadProgress } from "./lib/pdf-core";
+import { importPdf, preloadPdfEngine, type PdfLoadProgress } from "./lib/pdf-core";
 import { getNativeTextRestorationPlan, loadTextFonts, paintTextBlock, restoreTextSource } from "./lib/text-compositor";
 
 type Tool = "select" | "text" | "table" | "image" | "shape" | "signature" | "form" | "hand";
@@ -144,11 +144,17 @@ function importPdfWithStallTimeout(
 
 function importProgressMessage(progress: PdfLoadProgress): string {
   const pageNumber = Math.min(progress.total, progress.completed + 1);
-  if (progress.phase === "opening") return "Opening the PDF locally…";
+  if (progress.phase === "reading") return "Reading the PDF from this device…";
+  if (progress.phase === "loading-engine") return "Loading the PDF engine for first use…";
+  if (progress.phase === "opening") return "Opening the PDF structure…";
   if (progress.phase === "extracting") return `Reading page ${pageNumber} of ${progress.total}…`;
   if (progress.phase === "recognizing") return `Recognizing scan page ${pageNumber} of ${progress.total} locally — the first scan can take longer on a phone…`;
   if (progress.phase === "rendering") return `Preparing page ${pageNumber} of ${progress.total} for editing…`;
   return "Finishing the editable document…";
+}
+
+function warmPdfEngine(): void {
+  void preloadPdfEngine().catch(() => undefined);
 }
 
 function textHorizontalScale(object: TextBlock): number {
@@ -222,6 +228,10 @@ export default function Home() {
     );
   }, [documentModel, search]);
   const exportReadiness = useMemo(() => getExportReadiness(documentModel, originalBytes), [documentModel, originalBytes]);
+
+  useEffect(() => {
+    warmPdfEngine();
+  }, []);
 
   function commit(operation: EditOperation): void {
     setDocumentModel((current) => applyOperation(current, operation, "after"));
@@ -421,14 +431,9 @@ export default function Home() {
     importInFlightRef.current = true;
     try {
       setIsImporting(true);
-      setProgress({ phase: "opening", completed: 0, total: 1 });
+      setProgress({ phase: "reading", completed: 0, total: 1 });
       if (file.size > 100 * 1024 * 1024) {
         setNotice("This proof of concept limits local files to 100 MB.");
-        return;
-      }
-      const signature = new TextDecoder().decode(await file.slice(0, 5).arrayBuffer());
-      if (signature !== "%PDF-") {
-        setNotice("The file signature is not a PDF. Choose a valid PDF file.");
         return;
       }
       const imported = await importPdfWithStallTimeout(file, (nextProgress) => {
@@ -528,7 +533,18 @@ export default function Home() {
         <div className="topbar-actions">
           <button className="quiet-button" onClick={undo} disabled={history.cursor === 0} aria-label="Undo">↶</button>
           <button className="quiet-button" onClick={redo} disabled={history.cursor >= history.entries.length} aria-label="Redo">↷</button>
-          <button className="open-button" onClick={() => inputRef.current?.click()} disabled={isImporting}>{isImporting ? "Opening…" : "Open PDF"}</button>
+          <button
+            className="open-button"
+            onClick={() => inputRef.current?.click()}
+            onFocus={warmPdfEngine}
+            onMouseEnter={warmPdfEngine}
+            onPointerDown={warmPdfEngine}
+            onPointerEnter={warmPdfEngine}
+            onTouchStart={warmPdfEngine}
+            disabled={isImporting}
+          >
+            {isImporting ? "Opening…" : "Open PDF"}
+          </button>
           <button className="export-button" onClick={handleExport} disabled={isExporting}>{isExporting ? "Exporting…" : "Export PDF"} <span>↗</span></button>
           <input ref={inputRef} onChange={onFileChange} accept="application/pdf,.pdf" type="file" hidden />
         </div>
