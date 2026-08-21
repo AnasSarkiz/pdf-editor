@@ -10,12 +10,12 @@ The browser implementation now validates the highest-risk client path:
 2. Parse a native PDF with PDF.js in a worker.
 3. Extract native text items, placement matrices, font identifiers, annotations, and image paint operations.
 4. Normalize those into stable semantic objects in one top-left point coordinate system.
-5. Render each page separately from its semantic data at a high-quality preview scale.
+5. Render each native page at a high-quality preview scale and create a companion render with native text paint operations removed for exact background restoration.
 6. For image-only scanned pages, render a separate 300 dpi canvas and recognize Arabic + English text locally in a browser worker.
 7. Support selection, inline text editing, a property inspector, add-text, delete, duplicate, Unicode-aware search, and operation history.
-8. Export a valid PDF without rasterizing untouched input pages. Export is held whenever this browser build cannot preserve fidelity safely.
+8. Export untouched inputs through the native patch path and route changed/deleted source text through the high-resolution flattened compositor so edits are never silently dropped.
 
-This is deliberately not a claim that arbitrary native PDF content streams can already be rewritten losslessly in the browser. A modified native text block is held for the reconstruction worker rather than covered with a white rectangle or silently flattened.
+This is deliberately not a claim that arbitrary native PDF content streams can already be rewritten losslessly in the browser. The editor reconstructs changed source text visually from a text-free source render, preserves overlapping runs and source paint-order occlusions, and labels the result as flattened; a future worker is still required for lossless content-stream rewriting.
 
 ## Processing pipeline
 
@@ -33,7 +33,7 @@ flowchart LR
   J --> K["Operation log\nundo / redo / serialization"]
   K --> L["Export planner"]
   L --> M["Patch export\nuntouched original pages"]
-  L --> N["Reconstruction worker\nchanged native text / shaped Arabic"]
+  L --> N["Shared canvas compositor\nchanged source text / shaped Arabic"]
   M --> O["Valid PDF + fidelity report"]
   N --> O
 ```
@@ -47,6 +47,7 @@ flowchart LR
 | `app/lib/recognition.ts` | OCR/layout/table provider interfaces, scan classification, reading order | Yes |
 | `app/lib/local-ocr.ts` | Browser-local 300 dpi Arabic + English OCR worker and geometry normalization | Yes |
 | `app/lib/export-engine.ts` | Export strategy selection, valid PDF patch/reconstruction proof of concept | Yes |
+| `app/lib/text-compositor.ts` | Source restoration, overlap planning, font loading, and preview/export text painting | Yes |
 | `app/page.tsx` | Interaction composition only: selection, tool state, history controls | No |
 
 ## Coordinate system
@@ -57,21 +58,21 @@ All `bbox` values are points relative to a page whose origin is at top-left. Nat
 
 The editor uses browser Unicode bidi handling (`dir="rtl"` / `dir="ltr"` and `unicode-bidi: plaintext`) and detects Arabic at object level. It never reverses Arabic strings. Mixed content remains a Unicode string in the document model and the browser performs shaping/visual ordering for the editing view.
 
-Exporting newly-created or reconstructed Arabic needs two additional worker dependencies: an embeddable Arabic font and HarfBuzz shaping. The export planner blocks that path explicitly until it is present; it does not emit disconnected Arabic glyphs, substitute an incompatible font, or convert the page to an image.
+Lossless export of newly-created or reconstructed Arabic needs two additional worker dependencies: an embeddable Arabic font and HarfBuzz shaping. Until those are present, the export planner uses the browser-shaped high-resolution visual fallback instead of emitting disconnected Arabic glyphs or substituting an incompatible PDF font.
 
 ## Export strategies
 
 | Strategy | Status | Intended use |
 | --- | --- | --- |
 | Patch | Implemented for untouched inputs and new Latin text | Keeps unmodified original pages as PDF objects |
-| Reconstruction | Planned worker contract | Changed native content, table edits, shaped Arabic text |
-| Flatten | Deliberate opt-in only | Final distribution when the user accepts lost editability |
+| Reconstruction | Planned worker contract | Lossless changed native content, table edits, shaped Arabic text |
+| Flatten | Implemented fidelity fallback | Changed/deleted source text and browser-shaped Arabic when native rewriting is unsafe |
 | OCR layer | Provider contract | Scanned page with a searchable text layer |
 | Optimize | Planned | Compression and font subsetting after fidelity validation |
 
 ## Security posture
 
-The browser path validates `%PDF-` before parsing, limits this proof of concept to 100 MB, disables PDF.js JavaScript evaluation, and does not send page imagery to an OCR service. Image-only scans are recognized in a local Web Worker using downloaded Arabic and English model files. A future server-assisted provider must make upload consent and retention policy explicit.
+The browser path validates `%PDF-` before parsing, limits this proof of concept to 100 MB, disables PDF.js JavaScript evaluation, and does not send page imagery to an OCR service. Image-only scans are recognized in a local Web Worker using downloaded Arabic and English model files. OCR blocks remain source-locked until the recognition contract includes a persistent glyph-accurate cleanup mask; rectangular token bounds alone are never treated as safe erasure masks. A future server-assisted provider must make upload consent and retention policy explicit.
 
 ## Production worker roadmap
 

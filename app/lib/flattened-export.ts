@@ -1,6 +1,7 @@
 import { PDFDocument } from "pdf-lib";
-import type { DocumentPage, EditableDocument, Rect, TextBlock } from "./document-model";
-import { needsNativeCanvasReplacement } from "./editor-visibility";
+import type { DocumentPage, EditableDocument, TextBlock } from "./document-model";
+import { hasUnsafeNativeSourceMutation, hasUnsafeOcrSourceMutation, needsSourceCanvasReplacement } from "./editor-visibility";
+import { getNativeTextRestorationPlan, loadTextFonts, paintTextBlock, restoreTextSource } from "./text-compositor";
 
 function loadImage(source: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -17,8 +18,7 @@ async function canvasPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
 }
 
 function sourceNeedsReplacement(block: TextBlock): boolean {
-  if (block.source === "native-pdf") return needsNativeCanvasReplacement(block);
-  return block.originalText !== undefined && block.originalText !== block.text;
+  return needsSourceCanvasReplacement(block);
 }
 
 function shouldDrawText(page: DocumentPage, block: TextBlock): boolean {
@@ -27,73 +27,21 @@ function shouldDrawText(page: DocumentPage, block: TextBlock): boolean {
   return sourceNeedsReplacement(block);
 }
 
-function concealSourceText(context: CanvasRenderingContext2D, source: Rect, scaleX: number, scaleY: number): void {
-  const paddingX = Math.max(2, scaleX * 1.5);
-  const paddingY = Math.max(2, scaleY * 1.5);
-  const x = Math.max(0, source.x * scaleX - paddingX);
-  const y = Math.max(0, source.y * scaleY - paddingY);
-  const width = Math.min(context.canvas.width - x, source.width * scaleX + paddingX * 2);
-  const height = Math.min(context.canvas.height - y, source.height * scaleY + paddingY * 2);
-  if (width <= 0 || height <= 0) return;
-
-  const samples = [
-    [x, Math.max(0, y - paddingY * 2), width, paddingY],
-    [x, Math.min(context.canvas.height - paddingY, y + height + paddingY), width, paddingY],
-    [Math.max(0, x - paddingX * 2), y, paddingX, height],
-    [Math.min(context.canvas.width - paddingX, x + width + paddingX), y, paddingX, height],
-  ] as const;
-  let red = 0;
-  let green = 0;
-  let blue = 0;
-  let count = 0;
-  for (const [sampleX, sampleY, sampleWidth, sampleHeight] of samples) {
-    const safeWidth = Math.max(1, Math.min(context.canvas.width - Math.floor(sampleX), Math.ceil(sampleWidth)));
-    const safeHeight = Math.max(1, Math.min(context.canvas.height - Math.floor(sampleY), Math.ceil(sampleHeight)));
-    const pixels = context.getImageData(Math.floor(sampleX), Math.floor(sampleY), safeWidth, safeHeight).data;
-    for (let index = 0; index < pixels.length; index += 4) {
-      if (pixels[index] + pixels[index + 1] + pixels[index + 2] < 150) continue;
-      red += pixels[index];
-      green += pixels[index + 1];
-      blue += pixels[index + 2];
-      count += 1;
-    }
-  }
-  if (!count) return;
-  context.save();
-  context.fillStyle = `rgb(${Math.round(red / count)}, ${Math.round(green / count)}, ${Math.round(blue / count)})`;
-  context.fillRect(x, y, width, height);
-  context.restore();
-}
-
-function drawText(context: CanvasRenderingContext2D, block: TextBlock): void {
-  context.save();
-  context.translate(block.bbox.x, block.bbox.y + block.style.fontSize);
-  if (block.rotation) context.rotate((block.rotation * Math.PI) / 180);
-  context.font = `${block.style.fontStyle} ${block.style.fontWeight} ${block.style.fontSize}px ${block.style.fontFamily}`;
-  context.fillStyle = block.style.color;
-  context.textBaseline = "alphabetic";
-  context.textAlign = "left";
-  context.direction = block.direction === "auto" ? "inherit" : block.direction;
-  block.text.split(/\r?\n/).forEach((line, lineIndex) => {
-    const letterSpacing = block.style.letterSpacing;
-    const lineWidth = context.measureText(line).width + Math.max(0, line.length - 1) * letterSpacing;
-    const x = block.style.align === "right" ? block.bbox.width - lineWidth : block.style.align === "center" ? (block.bbox.width - lineWidth) / 2 : 0;
-    const y = lineIndex * block.style.fontSize * block.style.lineHeight;
-    if (!letterSpacing) {
-      context.fillText(line, x, y);
-      return;
-    }
-    let advance = x;
-    for (const glyph of Array.from(line)) {
-      context.fillText(glyph, advance, y);
-      advance += context.measureText(glyph).width + letterSpacing;
-    }
-  });
-  context.restore();
+function imageCanvas(image: HTMLImageElement): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) throw new Error("Canvas rendering is unavailable in this browser.");
+  context.drawImage(image, 0, 0);
+  return canvas;
 }
 
 async function flattenPage(page: DocumentPage): Promise<HTMLCanvasElement> {
-  const image = page.background ? await loadImage(page.background) : null;
+  const [image, cleanImage] = await Promise.all([
+    page.background ? loadImage(page.background) : Promise.resolve(null),
+    page.cleanBackground ? loadImage(page.cleanBackground) : Promise.resolve(null),
+  ]);
   const scaleX = image ? image.naturalWidth / page.width : 3;
   const scaleY = image ? image.naturalHeight / page.height : 3;
   const canvas = document.createElement("canvas");
@@ -104,16 +52,28 @@ async function flattenPage(page: DocumentPage): Promise<HTMLCanvasElement> {
   context.fillStyle = "#fff";
   context.fillRect(0, 0, canvas.width, canvas.height);
   if (image) context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const cleanContext = cleanImage ? imageCanvas(cleanImage).getContext("2d", { alpha: false }) : null;
 
   const textBlocks = page.objects.filter((object): object is TextBlock => object.type === "text" && shouldDrawText(page, object));
-  await Promise.all(textBlocks.map((block) => document.fonts.load(`${block.style.fontStyle} ${block.style.fontWeight} ${block.style.fontSize}px ${block.style.fontFamily}`, block.text).catch(() => [])));
-  for (const block of textBlocks) {
-    if (page.background && sourceNeedsReplacement(block)) concealSourceText(context, block.originalBbox ?? block.bbox, scaleX, scaleY);
-    context.save();
-    context.scale(scaleX, scaleY);
-    drawText(context, block);
-    context.restore();
+  const sourceReplacements = page.objects.filter(
+    (object): object is TextBlock => object.type === "text" && sourceNeedsReplacement(object),
+  );
+  const deletedSourceText = page.deletedSourceText ?? [];
+  const nativePlan = getNativeTextRestorationPlan(
+    page.objects.filter((object): object is TextBlock => object.type === "text" && object.source === "native-pdf"),
+    [...sourceReplacements, ...deletedSourceText],
+  );
+  const paintBlocks = [...new Map(
+    [...textBlocks, ...nativePlan.repaint].map((block) => [block.id, block]),
+  ).values()];
+  await loadTextFonts(paintBlocks, scaleY);
+  if (page.background) {
+    for (const block of nativePlan.restore) restoreTextSource(context, cleanContext, block, scaleX, scaleY);
+    for (const block of [...sourceReplacements, ...deletedSourceText]) {
+      if (block.source === "ocr") restoreTextSource(context, cleanContext, block, scaleX, scaleY);
+    }
   }
+  for (const block of paintBlocks.sort((left, right) => left.zIndex - right.zIndex)) paintTextBlock(context, block, scaleX, scaleY);
   return canvas;
 }
 
@@ -124,6 +84,19 @@ async function flattenPage(page: DocumentPage): Promise<HTMLCanvasElement> {
  * the original native content stream was losslessly rewritten.
  */
 export async function exportFlattenedPdf(document: EditableDocument): Promise<Uint8Array> {
+  const unsafeOcrEdit = document.pages.some((page) =>
+    page.objects.some((object) => object.type === "text" && hasUnsafeOcrSourceMutation(object))
+    || (page.deletedSourceText ?? []).some((object) => object.source === "ocr"),
+  );
+  if (unsafeOcrEdit) {
+    throw new Error("Recognized scan text cannot be removed safely without a glyph-accurate cleanup mask. Undo that OCR edit before exporting.");
+  }
+  const unsafeNativeEdit = document.pages.some((page) => page.objects.some(
+    (object) => object.type === "text" && hasUnsafeNativeSourceMutation(object),
+  ));
+  if (unsafeNativeEdit) {
+    throw new Error("This native text edit crosses source graphics that cannot be reconstructed safely. Undo it or duplicate the text as a new editable object.");
+  }
   const pdf = await PDFDocument.create();
   for (const modelPage of document.pages) {
     const canvas = await flattenPage(modelPage);

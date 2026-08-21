@@ -22,12 +22,14 @@ The editor keeps document work local to the browser: it opens a PDF, builds an e
 
 - Extract native PDF text where it is available.
 - Run local Arabic + English OCR on image-only scans at 300 dpi.
+- Search and review recognized scan text. OCR source pixels remain locked until recognition can supply a glyph-accurate cleanup mask; a recognized block can still be duplicated as new editable text.
 - Preserve Unicode text, paragraph direction, and mixed Arabic/English content in the editing surface.
 
 ### Export
 
 - **Safe native export:** untouched PDFs and compatible newly-added Latin text retain a normal PDF export path.
-- **Visual fallback export:** edited native text and Arabic reconstruction export as a high-quality flattened PDF. This ensures the visible result is preserved instead of silently losing an edit.
+- **Source-aware native editing:** changed or deleted native PDF text is removed from its original position, overlapping text is recomposed, and edited runs use the same canvas renderer in preview and export.
+- **Visual fallback export:** source-text edits and Arabic reconstruction export as a high-quality flattened PDF. This preserves the visible result instead of silently dropping an edit.
 
 ## How to use it
 
@@ -46,7 +48,7 @@ The editor keeps document work local to the browser: it opens a PDF, builds an e
 ## Development
 
 ```bash
-npm install
+bun install
 bun run dev
 bun run lint
 bun test
@@ -59,6 +61,7 @@ bun run build
 - PDF.js handles browser-side PDF reading, native text extraction, and page rendering.
 - Tesseract.js provides local Arabic and English OCR for scanned documents.
 - pdf-lib produces compatible PDF output and the flattened visual fallback.
+- A shared text compositor preserves extracted font metrics, transforms, spacing, source backgrounds, and preview/export parity.
 - The editor uses a semantic document model so text, tables, forms, source confidence, language, and direction are independently represented.
 
 ## Roadmap

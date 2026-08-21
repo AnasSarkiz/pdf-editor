@@ -5,8 +5,9 @@ import { downloadPdf, exportPdf, getExportReadiness } from "./lib/export-engine"
 import { exportFlattenedPdf } from "./lib/flattened-export";
 import type { DocumentPage, EditableDocument, EditOperation, PageObject, Rect, TextBlock, TextDirection, TextStyle } from "./lib/document-model";
 import { createDemoDocument, defaultTextStyle, detectTextMeta, identityMatrix, stableId } from "./lib/document-model";
-import { isTextReplacementPreview, needsNativeCanvasReplacement, shouldRenderTextContent } from "./lib/editor-visibility";
+import { canSafelyMutateText, canSafelyPlaceText, isCanvasBackedText, isTextReplacementPreview, needsSourceCanvasReplacement, shouldRenderTextContent } from "./lib/editor-visibility";
 import { importPdf, type PdfLoadProgress } from "./lib/pdf-core";
+import { getNativeTextRestorationPlan, loadTextFonts, paintTextBlock, restoreTextSource } from "./lib/text-compositor";
 
 type Tool = "select" | "text" | "table" | "image" | "shape" | "signature" | "form" | "hand";
 type Panel = "properties" | "layers" | "review" | "search";
@@ -48,10 +49,22 @@ function applyOperation(document: EditableDocument, operation: EditOperation, ph
   }
   if (operation.type === "delete") {
     if (phase === "after") {
-      if (target) next.pages[target.pageIndex].objects.splice(target.objectIndex, 1);
+      if (target) {
+        const page = next.pages[target.pageIndex];
+        if (target.object.type === "text" && isCanvasBackedText(target.object)) {
+          page.deletedSourceText = [
+            ...(page.deletedSourceText ?? []).filter((block) => block.id !== target.object.id),
+            structuredClone(target.object),
+          ];
+        }
+        page.objects.splice(target.objectIndex, 1);
+      }
     } else {
       const page = next.pages.find((entry) => entry.id === operation.pageId);
-      if (page && operation.before) page.objects.push(operation.before as PageObject);
+      if (page && operation.before) {
+        page.deletedSourceText = page.deletedSourceText?.filter((block) => block.id !== operation.targetId);
+        page.objects.push(operation.before as PageObject);
+      }
     }
     return next;
   }
@@ -81,22 +94,42 @@ function escapeRegularExpression(value: string): string {
 const MIN_TEXT_BOX_WIDTH = 24;
 const MIN_TEXT_BOX_HEIGHT = 20;
 
-function fitTextBounds(text: string, bbox: Rect, pageWidth: number, pageHeight: number, style: TextStyle, minimum: Pick<Rect, "width" | "height"> = { width: 0, height: 0 }): Rect {
+function textHorizontalScale(object: TextBlock): number {
+  if (object.source !== "native-pdf") return 1;
+  const vertical = Math.max(0.001, Math.hypot(object.transform.c, object.transform.d));
+  return Math.max(0.001, Math.hypot(object.transform.a, object.transform.b)) / vertical;
+}
+
+function fitTextBounds(
+  text: string,
+  bbox: Rect,
+  pageWidth: number,
+  pageHeight: number,
+  style: TextStyle,
+  minimum: Pick<Rect, "width" | "height"> = { width: 0, height: 0 },
+  horizontalScale = 1,
+): Rect {
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d");
   const lines = text.split(/\r?\n/);
   let widestLine = 0;
   if (context) {
     context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize}px ${style.fontFamily}`;
-    widestLine = Math.max(...lines.map((line) => context.measureText(line || " ").width + Math.max(0, line.length - 1) * style.letterSpacing));
+    widestLine = Math.max(...lines.map((line) => (context.measureText(line || " ").width + Math.max(0, Array.from(line).length - 1) * style.letterSpacing) * horizontalScale));
   } else {
-    widestLine = Math.max(...lines.map((line) => Math.max(1, line.length) * style.fontSize * 0.58));
+    widestLine = Math.max(...lines.map((line) => Math.max(1, Array.from(line).length) * style.fontSize * 0.58 * horizontalScale));
   }
-  const availableWidth = Math.max(MIN_TEXT_BOX_WIDTH, pageWidth - bbox.x);
+  const desiredWidth = Math.max(MIN_TEXT_BOX_WIDTH, minimum.width, widestLine + 4);
+  let x = bbox.x;
+  if (style.align === "right") x = bbox.x + bbox.width - desiredWidth;
+  else if (style.align === "center") x = bbox.x + (bbox.width - desiredWidth) / 2;
+  x = clamp(x, 0, Math.max(0, pageWidth - MIN_TEXT_BOX_WIDTH));
+  const availableWidth = Math.max(MIN_TEXT_BOX_WIDTH, pageWidth - x);
   const availableHeight = Math.max(MIN_TEXT_BOX_HEIGHT, pageHeight - bbox.y);
   return {
     ...bbox,
-    width: clamp(Math.max(MIN_TEXT_BOX_WIDTH, minimum.width, widestLine + 4), MIN_TEXT_BOX_WIDTH, availableWidth),
+    x,
+    width: clamp(desiredWidth, MIN_TEXT_BOX_WIDTH, availableWidth),
     height: clamp(Math.max(MIN_TEXT_BOX_HEIGHT, minimum.height, lines.length * style.fontSize * style.lineHeight + 4), MIN_TEXT_BOX_HEIGHT, availableHeight),
   };
 }
@@ -138,6 +171,11 @@ export default function Home() {
 
   function updateSelected(changes: Partial<TextBlock>, label: string): void {
     if (!selected || selected.type !== "text") return;
+    const next = { ...selected, ...changes };
+    if (!canSafelyMutateText(selected) || !canSafelyPlaceText(next, next.bbox)) {
+      setNotice("This source text is locked because changing its pixels cannot yet be guaranteed without damaging nearby page content. Duplicate it to add an editable copy.");
+      return;
+    }
     commit({
       id: stableId("op"),
       type: "update",
@@ -145,7 +183,7 @@ export default function Home() {
       pageId: selected.pageId,
       at: new Date().toISOString(),
       before: selected,
-      after: { ...selected, ...changes },
+      after: next,
       label,
     });
   }
@@ -197,6 +235,10 @@ export default function Home() {
 
   function deleteSelected(): void {
     if (!selected) return;
+    if (selected.type === "text" && !canSafelyMutateText(selected)) {
+      setNotice("This source text is locked because safe removal cannot be verified for this page. Duplicate it to create an editable copy.");
+      return;
+    }
     commit({ id: stableId("op"), type: "delete", targetId: selected.id, pageId: selected.pageId, at: new Date().toISOString(), before: selected, label: `Deleted ${objectLabel(selected)}` });
     setSelectedId(null);
     setNotice("Object deleted. Use Undo to restore it.");
@@ -204,12 +246,23 @@ export default function Home() {
 
   function duplicateSelected(): void {
     if (!selected) return;
-    const duplicate = { ...cloneDocument({ ...documentModel, pages: [{ ...page, objects: [selected] }] }).pages[0].objects[0], id: stableId(selected.type), bbox: { ...selected.bbox, x: selected.bbox.x + 18, y: selected.bbox.y + 18 }, source: "user" as const };
+    const duplicate = {
+      ...cloneDocument({ ...documentModel, pages: [{ ...page, objects: [selected] }] }).pages[0].objects[0],
+      id: stableId(selected.type),
+      bbox: { ...selected.bbox, x: selected.bbox.x + 18, y: selected.bbox.y + 18 },
+      source: "user" as const,
+      editable: true,
+      locked: false,
+    };
     commit({ id: stableId("op"), type: "create", targetId: duplicate.id, pageId: page.id, at: new Date().toISOString(), after: duplicate, label: `Duplicated ${objectLabel(selected)}` });
     setSelectedId(duplicate.id);
   }
 
   function moveObject(object: PageObject, bbox: Rect): void {
+    if (object.type === "text" && (!canSafelyMutateText(object) || !canSafelyPlaceText({ ...object, bbox }, bbox))) {
+      setNotice("This source text is locked because moving it cannot yet be composited safely over every nearby graphic.");
+      return;
+    }
     if (object.bbox.x === bbox.x && object.bbox.y === bbox.y) return;
     commit({
       id: stableId("op"),
@@ -227,6 +280,10 @@ export default function Home() {
   }
 
   function resizeObject(object: TextBlock, bbox: Rect): void {
+    if (!canSafelyMutateText(object) || !canSafelyPlaceText({ ...object, bbox }, bbox)) {
+      setNotice("This source text is locked because resizing it cannot yet be composited safely over every nearby graphic.");
+      return;
+    }
     if (object.bbox.width === bbox.width && object.bbox.height === bbox.height) return;
     commit({
       id: stableId("op"),
@@ -250,6 +307,7 @@ export default function Home() {
       return;
     }
     const operations: EditOperation[] = [];
+    let lockedMatches = 0;
     documentModel.pages.forEach((entry) => {
       entry.objects.forEach((object) => {
         if (object.type !== "text") return;
@@ -259,8 +317,12 @@ export default function Home() {
           ...object,
           text: nextText,
           ...detectTextMeta(nextText),
-          ...(object.source === "user" ? { bbox: fitTextBounds(nextText, object.bbox, entry.width, entry.height, object.style, object.bbox) } : {}),
+          bbox: fitTextBounds(nextText, object.bbox, entry.width, entry.height, object.style, object.bbox, textHorizontalScale(object)),
         };
+        if (!canSafelyMutateText(object) || !canSafelyPlaceText(nextObject, nextObject.bbox)) {
+          lockedMatches += 1;
+          return;
+        }
         operations.push({
           id: stableId("op"),
           type: "update",
@@ -274,12 +336,14 @@ export default function Home() {
       });
     });
     if (!operations.length) {
-      setNotice(`No matches found for “${query}”.`);
+      setNotice(lockedMatches
+        ? `Found ${lockedMatches} locked source-text block${lockedMatches === 1 ? "" : "s"}; none can be replaced without risking nearby page content.`
+        : `No matches found for “${query}”.`);
       return;
     }
     setDocumentModel((current) => operations.reduce((next, operation) => applyOperation(next, operation, "after"), current));
     setHistory((current) => ({ entries: [...current.entries.slice(0, current.cursor), ...operations], cursor: current.cursor + operations.length }));
-    setNotice(`Replaced ${operations.length} text block${operations.length === 1 ? "" : "s"}. Use Undo to step back through each change.`);
+    setNotice(`Replaced ${operations.length} text block${operations.length === 1 ? "" : "s"}${lockedMatches ? `; skipped ${lockedMatches} locked source block${lockedMatches === 1 ? "" : "s"}` : ""}. Use Undo to step back through each change.`);
   }
 
   async function onFileChange(event: ChangeEvent<HTMLInputElement>): Promise<void> {
@@ -316,6 +380,10 @@ export default function Home() {
 
   async function handleExport(): Promise<void> {
     if (isExporting) return;
+    if (!exportReadiness.canExport && !exportReadiness.canFlatten) {
+      setNotice(exportReadiness.messages[0] ?? "This edit cannot be exported safely. Undo it and try again.");
+      return;
+    }
     try {
       setIsExporting(true);
       const flattened = !exportReadiness.canExport;
@@ -445,10 +513,11 @@ export default function Home() {
                   pageHeight={page.height}
                   showContent={object.type !== "text" || shouldRenderTextContent(object, Boolean(page.background), object.id === inlineEditing)}
                   replacementPreview={object.type === "text" && isTextReplacementPreview(object, Boolean(page.background), object.id === inlineEditing)}
+                  mutable={object.type !== "text" || canSafelyMutateText(object)}
                   selected={selectedId === object.id}
                   matched={matchingIds.has(object.id)}
                   onSelect={() => { setSelectedId(object.id); setActiveTool("select"); }}
-                  onEdit={() => object.type === "text" && setInlineEditing(object.id)}
+                  onEdit={() => object.type === "text" && canSafelyMutateText(object) && setInlineEditing(object.id)}
                   onTextCommit={(value, bbox) => object.type === "text" && updateSelected({ text: value, ...detectTextMeta(value), ...(bbox ? { bbox } : {}) }, "Edited text")}
                   onEditEnd={() => setInlineEditing(null)}
                   onMove={(bbox) => moveObject(object, bbox)}
@@ -465,7 +534,11 @@ export default function Home() {
           <nav className="inspector-tabs" aria-label="Inspector sections">
             {(["properties", "layers", "review", "search"] as Panel[]).map((panel) => <button key={panel} className={activePanel === panel ? "is-active" : ""} onClick={() => setActivePanel(panel)}>{panel}</button>)}
           </nav>
-          {activePanel === "properties" && <PropertiesPanel selected={selected} onTextChange={(text) => selected?.type === "text" && updateSelected({ text, ...detectTextMeta(text), ...(selected.source === "user" ? { bbox: fitTextBounds(text, selected.bbox, page.width, page.height, selected.style, selected.bbox) } : {}) }, "Edited text")} onStyleChange={(style) => selected?.type === "text" && updateSelected({ style: { ...selected.style, ...style } }, "Changed text style")} onRotationChange={(rotation) => selected?.type === "text" && updateSelected({ rotation: clamp(rotation, -180, 180) }, "Rotated text")} onDirectionChange={(direction) => selected?.type === "text" && updateSelected({ direction }, "Changed paragraph direction")} onDelete={deleteSelected} onDuplicate={duplicateSelected} />}
+          {activePanel === "properties" && <PropertiesPanel selected={selected} onTextChange={(text) => selected?.type === "text" && updateSelected({ text, ...detectTextMeta(text), bbox: fitTextBounds(text, selected.bbox, page.width, page.height, selected.style, selected.bbox, textHorizontalScale(selected)) }, "Edited text")} onStyleChange={(style) => {
+            if (!selected || selected.type !== "text") return;
+            const nextStyle = { ...selected.style, ...style };
+            updateSelected({ style: nextStyle, bbox: fitTextBounds(selected.text, selected.bbox, page.width, page.height, nextStyle, selected.bbox, textHorizontalScale(selected)) }, "Changed text style");
+          }} onRotationChange={(rotation) => selected?.type === "text" && updateSelected({ rotation: clamp(rotation, -180, 180) }, "Rotated text")} onDirectionChange={(direction) => selected?.type === "text" && updateSelected({ direction }, "Changed paragraph direction")} onDelete={deleteSelected} onDuplicate={duplicateSelected} />}
           {activePanel === "layers" && <LayersPanel page={page} selectedId={selectedId} onSelect={setSelectedId} />}
           {activePanel === "review" && <ReviewPanel page={page} readiness={exportReadiness} />}
           {activePanel === "search" && <SearchPanel search={search} setSearch={setSearch} document={documentModel} onReplaceAll={replaceAllMatches} onSelect={(id) => { setSelectedId(id); const located = findObject(documentModel, id); if (located) setCurrentPageIndex(located.pageIndex); }} />}
@@ -484,7 +557,7 @@ export default function Home() {
   );
 }
 
-function SemanticObject({ object, pageWidth, pageHeight, selected, matched, showContent, replacementPreview, editing, onSelect, onEdit, onTextCommit, onEditEnd, onMove, onResize }: { object: PageObject; pageWidth: number; pageHeight: number; selected: boolean; matched: boolean; showContent: boolean; replacementPreview: boolean; editing: boolean; onSelect: () => void; onEdit: () => void; onTextCommit: (value: string, bbox?: Rect) => void; onEditEnd: () => void; onMove: (bbox: Rect) => void; onResize: (bbox: Rect) => void }) {
+function SemanticObject({ object, pageWidth, pageHeight, selected, matched, showContent, replacementPreview, mutable, editing, onSelect, onEdit, onTextCommit, onEditEnd, onMove, onResize }: { object: PageObject; pageWidth: number; pageHeight: number; selected: boolean; matched: boolean; showContent: boolean; replacementPreview: boolean; mutable: boolean; editing: boolean; onSelect: () => void; onEdit: () => void; onTextCommit: (value: string, bbox?: Rect) => void; onEditEnd: () => void; onMove: (bbox: Rect) => void; onResize: (bbox: Rect) => void }) {
   const [draftText, setDraftText] = useState(object.type === "text" ? object.text : "");
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
   const [draftBbox, setDraftBbox] = useState<Rect | null>(null);
@@ -507,17 +580,18 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
   if (object.type === "form-field") return <button className={`semantic-object field-object ${selected ? "is-selected" : ""}`} style={style} onClick={onSelect} aria-label={`Form field ${object.name}`} />;
   if (object.type !== "text") return <button className={`semantic-object ${selected ? "is-selected" : ""}`} style={style} onClick={onSelect} aria-label={object.type} />;
   const finishEditing = () => {
-    const fittedBbox = object.source === "user" ? fitTextBounds(draftText, object.bbox, pageWidth, pageHeight, object.style, object.bbox) : undefined;
-    if (draftText !== object.text || (fittedBbox && (fittedBbox.width !== object.bbox.width || fittedBbox.height !== object.bbox.height))) onTextCommit(draftText, fittedBbox);
+    const fittedBbox = fitTextBounds(draftText, object.bbox, pageWidth, pageHeight, object.style, object.bbox, textHorizontalScale(object));
+    if (draftText !== object.text || fittedBbox.x !== object.bbox.x || fittedBbox.width !== object.bbox.width || fittedBbox.height !== object.bbox.height) onTextCommit(draftText, fittedBbox);
     setDraftBbox(null);
     onEditEnd();
   };
   const startEditing = () => {
+    if (!mutable) return;
     setDraftText(object.text);
     onEdit();
   };
   const startDragging = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (editing || (event.pointerType === "mouse" && event.button !== 0)) return;
+    if (!mutable || editing || (event.pointerType === "mouse" && event.button !== 0)) return;
     const paper = event.currentTarget.parentElement?.getBoundingClientRect();
     if (!paper) return;
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -547,7 +621,7 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     setDragOffset(null);
   };
   const startResizing = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (editing || (event.pointerType === "mouse" && event.button !== 0)) return;
+    if (!mutable || editing || (event.pointerType === "mouse" && event.button !== 0)) return;
     const paper = event.currentTarget.closest(".paper")?.getBoundingClientRect();
     if (!paper) return;
     event.preventDefault();
@@ -594,9 +668,9 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     letterSpacing: `${object.style.letterSpacing / pageWidth * 100}cqw`,
     textAlign: object.style.align,
   };
-  return <div className={`semantic-object text-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""} ${showContent || isDragging ? "show-content" : ""} ${replacementPreview ? "is-replacement-preview" : ""} ${isDragging ? "is-dragging" : ""}`} style={style} onClick={(event) => { event.stopPropagation(); onSelect(); }} onDoubleClick={startEditing} onPointerDown={startDragging} onPointerMove={updateDragging} onPointerUp={finishDragging} onPointerCancel={cancelDragging} role="button" tabIndex={0} aria-label={`Text: ${objectLabel(object)}${replacementPreview ? " (edited preview)" : ""}`}>
-    {editing ? <textarea autoFocus wrap="off" value={draftText} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => { const value = event.target.value; setDraftText(value); if (object.source === "user") setDraftBbox(fitTextBounds(value, object.bbox, pageWidth, pageHeight, object.style, object.bbox)); }} onBlur={finishEditing} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDraftText(object.text); setDraftBbox(null); onEditEnd(); } }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent || isDragging ? object.text : ""}</span>}
-    {selected && !editing && <button className="text-resize-handle" aria-label="Resize text box" title="Drag to resize text box" onClick={(event) => event.stopPropagation()} onPointerDown={startResizing} onPointerMove={updateResizing} onPointerUp={finishResizing} onPointerCancel={cancelResizing} />}
+  return <div className={`semantic-object text-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""} ${showContent || isDragging ? "show-content" : ""} ${replacementPreview ? "is-replacement-preview" : ""} ${isDragging ? "is-dragging" : ""} ${mutable ? "" : "is-locked"}`} style={style} onClick={(event) => { event.stopPropagation(); onSelect(); }} onDoubleClick={startEditing} onPointerDown={startDragging} onPointerMove={updateDragging} onPointerUp={finishDragging} onPointerCancel={cancelDragging} role="button" tabIndex={0} aria-label={`Text: ${objectLabel(object)}${replacementPreview ? " (edited preview)" : ""}${mutable ? "" : " (locked source text)"}`}>
+    {editing ? <textarea autoFocus wrap="off" value={draftText} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => { const value = event.target.value; setDraftText(value); setDraftBbox(fitTextBounds(value, object.bbox, pageWidth, pageHeight, object.style, object.bbox, textHorizontalScale(object))); }} onBlur={finishEditing} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDraftText(object.text); setDraftBbox(null); onEditEnd(); } }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent || isDragging ? object.text : ""}</span>}
+    {selected && mutable && !editing && <button className="text-resize-handle" aria-label="Resize text box" title="Drag to resize text box" onClick={(event) => event.stopPropagation()} onPointerDown={startResizing} onPointerMove={updateResizing} onPointerUp={finishResizing} onPointerCancel={cancelResizing} />}
     {selected && !replacementPreview && <span className="object-source">{object.source === "native-pdf" ? "native" : object.source}</span>}
   </div>;
 }
@@ -604,22 +678,38 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
 function PageRenderSurface({ page, mutedTextId }: { page: DocumentPage; mutedTextId: string | null }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const replacementSignature = page.objects
-    .filter((object): object is TextBlock => object.type === "text" && object.source === "native-pdf" && (object.id === mutedTextId || needsNativeCanvasReplacement(object)))
+    .filter((object): object is TextBlock => object.type === "text" && isCanvasBackedText(object) && canSafelyMutateText(object) && (object.id === mutedTextId || needsSourceCanvasReplacement(object)))
     .map((object) => `${object.id}:${object.text}:${object.bbox.x}:${object.bbox.y}:${object.bbox.width}:${object.bbox.height}:${object.rotation}:${object.style.fontFamily}:${object.style.fontSize}:${object.style.fontWeight}:${object.style.fontStyle}:${object.style.color}:${object.style.lineHeight}:${object.style.letterSpacing}:${object.style.align}:${object.direction}`)
+    .concat((page.deletedSourceText ?? []).map((object) => `deleted:${object.source}:${object.id}:${object.sourceBbox?.x}:${object.sourceBbox?.y}:${object.sourceBbox?.width}:${object.sourceBbox?.height}`))
     .join("|");
 
   useEffect(() => {
     if (!page.background || !canvasRef.current) return;
     let disposed = false;
     const canvas = canvasRef.current;
-    const image = new Image();
-    image.onload = async () => {
+    const loadImage = (source: string): Promise<HTMLImageElement> => new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error("The page preview could not be rendered."));
+      image.src = source;
+    });
+    void (async () => {
+      const [image, cleanImage] = await Promise.all([
+        loadImage(page.background!),
+        page.cleanBackground ? loadImage(page.cleanBackground) : Promise.resolve(null),
+      ]);
       if (disposed) return;
       const replacements = page.objects.filter(
-        (object): object is TextBlock => object.type === "text" && object.source === "native-pdf" && (object.id === mutedTextId || needsNativeCanvasReplacement(object)),
+        (object): object is TextBlock => object.type === "text" && isCanvasBackedText(object) && canSafelyMutateText(object) && (object.id === mutedTextId || needsSourceCanvasReplacement(object)),
       );
-      await Promise.all(replacements.map((object) => document.fonts.load(canvasFont(object, 1), object.text).catch(() => [])));
-      if (disposed) return;
+      const deletedSourceText = page.deletedSourceText ?? [];
+      const nativePlan = getNativeTextRestorationPlan(
+        page.objects.filter((object): object is TextBlock => object.type === "text" && object.source === "native-pdf"),
+        [...replacements, ...deletedSourceText],
+      );
+      const paintBlocks = [...new Map(
+        [...replacements, ...nativePlan.repaint].map((block) => [block.id, block]),
+      ).values()];
       canvas.width = image.naturalWidth;
       canvas.height = image.naturalHeight;
       const context = canvas.getContext("2d", { alpha: false });
@@ -627,97 +717,31 @@ function PageRenderSurface({ page, mutedTextId }: { page: DocumentPage; mutedTex
       context.drawImage(image, 0, 0);
       const scaleX = canvas.width / page.width;
       const scaleY = canvas.height / page.height;
-      replacements.forEach((object) => {
-        concealSourceText(context, object, scaleX, scaleY, object.originalBbox ?? object.bbox);
-        if (object.id !== mutedTextId) paintNativeTextReplacement(context, object, scaleX, scaleY);
-      });
-    };
-    image.src = page.background;
+      await loadTextFonts(paintBlocks, scaleY);
+      if (disposed) return;
+      let cleanContext: CanvasRenderingContext2D | null = null;
+      if (cleanImage) {
+        const cleanCanvas = document.createElement("canvas");
+        cleanCanvas.width = cleanImage.naturalWidth;
+        cleanCanvas.height = cleanImage.naturalHeight;
+        cleanContext = cleanCanvas.getContext("2d", { alpha: false });
+        cleanContext?.drawImage(cleanImage, 0, 0);
+      }
+      for (const object of nativePlan.restore) restoreTextSource(context, cleanContext, object, scaleX, scaleY);
+      for (const object of [...replacements, ...deletedSourceText]) {
+        if (object.source === "ocr") restoreTextSource(context, cleanContext, object, scaleX, scaleY);
+      }
+      for (const object of paintBlocks.sort((left, right) => left.zIndex - right.zIndex)) {
+        if (object.id !== mutedTextId) paintTextBlock(context, object, scaleX, scaleY);
+      }
+    })().catch(() => {
+      // Keep the last complete canvas visible if an image/font cannot load.
+    });
     return () => { disposed = true; };
   }, [page, mutedTextId, replacementSignature]);
 
   if (!page.background) return null;
   return <canvas ref={canvasRef} className="page-render-surface" aria-hidden="true" />;
-}
-
-function canvasFont(object: TextBlock, pixelScale: number): string {
-  return `${object.style.fontStyle} ${object.style.fontWeight} ${object.style.fontSize * pixelScale}px ${object.style.fontFamily}`;
-}
-
-function paintNativeTextReplacement(context: CanvasRenderingContext2D, object: TextBlock, scaleX: number, scaleY: number): void {
-  const verticalScale = Math.max(0.001, Math.hypot(object.transform.c, object.transform.d));
-  const horizontalScale = Math.hypot(object.transform.a, object.transform.b);
-  const textScale = (horizontalScale / verticalScale) * (scaleX / scaleY);
-  context.save();
-  context.translate(object.bbox.x * scaleX, (object.bbox.y + object.style.fontSize) * scaleY);
-  if (object.rotation) context.rotate((object.rotation * Math.PI) / 180);
-  context.scale(textScale, 1);
-  context.font = canvasFont(object, scaleY);
-  context.fillStyle = object.style.color;
-  context.textBaseline = "alphabetic";
-  context.textAlign = "left";
-  context.direction = object.direction === "auto" ? "inherit" : object.direction;
-  drawCanvasText(context, object.text, object.style.letterSpacing * scaleY, object.style.fontSize * object.style.lineHeight * scaleY, (object.bbox.width * scaleX) / textScale, object.style.align);
-  context.restore();
-}
-
-function drawCanvasText(context: CanvasRenderingContext2D, text: string, letterSpacing: number, lineHeight: number, availableWidth: number, align: TextStyle["align"]): void {
-  text.split(/\r?\n/).forEach((line, lineIndex) => {
-    const y = lineIndex * lineHeight;
-    const measuredWidth = context.measureText(line).width + Math.max(0, line.length - 1) * letterSpacing;
-    const x = align === "right" ? availableWidth - measuredWidth : align === "center" ? (availableWidth - measuredWidth) / 2 : 0;
-    if (!letterSpacing) {
-      context.fillText(line, x, y);
-      return;
-    }
-    let advance = x;
-    for (const glyph of Array.from(line)) {
-      context.fillText(glyph, advance, y);
-      advance += context.measureText(glyph).width + letterSpacing;
-    }
-  });
-}
-
-function concealSourceText(context: CanvasRenderingContext2D, object: TextBlock, scaleX: number, scaleY: number, sourceBbox: Rect): void {
-  const paddingX = Math.max(2, scaleX * 1.5);
-  const paddingY = Math.max(2, scaleY * 1.5);
-  const x = Math.max(0, sourceBbox.x * scaleX - paddingX);
-  const y = Math.max(0, sourceBbox.y * scaleY - paddingY);
-  const width = Math.min(context.canvas.width - x, sourceBbox.width * scaleX + paddingX * 2);
-  const height = Math.min(context.canvas.height - y, sourceBbox.height * scaleY + paddingY * 2);
-  if (width <= 0 || height <= 0) return;
-
-  // Derive the repair colour from the pixels immediately around the original
-  // glyphs. This keeps the page preview continuous without putting a CSS box
-  // behind edited text.
-  const samples = [
-    [x, Math.max(0, y - paddingY * 2), width, paddingY],
-    [x, Math.min(context.canvas.height - paddingY, y + height + paddingY), width, paddingY],
-    [Math.max(0, x - paddingX * 2), y, paddingX, height],
-    [Math.min(context.canvas.width - paddingX, x + width + paddingX), y, paddingX, height],
-  ] as const;
-  let red = 0;
-  let green = 0;
-  let blue = 0;
-  let count = 0;
-  for (const [sampleX, sampleY, sampleWidth, sampleHeight] of samples) {
-    const safeWidth = Math.max(1, Math.min(context.canvas.width - Math.floor(sampleX), Math.ceil(sampleWidth)));
-    const safeHeight = Math.max(1, Math.min(context.canvas.height - Math.floor(sampleY), Math.ceil(sampleHeight)));
-    const pixels = context.getImageData(Math.floor(sampleX), Math.floor(sampleY), safeWidth, safeHeight).data;
-    for (let index = 0; index < pixels.length; index += 4) {
-      // Ignore dark neighbouring glyphs and favour the actual page surface.
-      if (pixels[index] + pixels[index + 1] + pixels[index + 2] < 150) continue;
-      red += pixels[index];
-      green += pixels[index + 1];
-      blue += pixels[index + 2];
-      count += 1;
-    }
-  }
-  if (!count) return;
-  context.save();
-  context.fillStyle = `rgb(${Math.round(red / count)}, ${Math.round(green / count)}, ${Math.round(blue / count)})`;
-  context.fillRect(x, y, width, height);
-  context.restore();
 }
 
 function SelectionRuler({ object, pageWidth, pageHeight }: { object: PageObject; pageWidth: number; pageHeight: number }) {
@@ -727,12 +751,42 @@ function SelectionRuler({ object, pageWidth, pageHeight }: { object: PageObject;
 function PropertiesPanel({ selected, onTextChange, onStyleChange, onRotationChange, onDirectionChange, onDelete, onDuplicate }: { selected: PageObject | null; onTextChange: (value: string) => void; onStyleChange: (value: Partial<TextStyle>) => void; onRotationChange: (value: number) => void; onDirectionChange: (direction: TextDirection) => void; onDelete: () => void; onDuplicate: () => void }) {
   if (!selected) return <div className="empty-inspector"><span className="empty-glyph">⌁</span><strong>Select an object</strong><p>Text, tables, form fields, and recognized graphics keep their own semantic metadata.</p></div>;
   if (selected.type !== "text") return <div className="object-inspector"><span className="eyebrow">{selected.type.replace("-", " ")}</span><h2>{objectLabel(selected)}</h2><div className="confidence-card"><span>Recognition confidence</span><strong>{formatConfidence(selected.confidence)}</strong><i><b style={{ width: `${selected.confidence * 100}%` }} /></i></div><dl><div><dt>Source</dt><dd>{selected.source}</dd></div><div><dt>Bounds</dt><dd>{Math.round(selected.bbox.width)} × {Math.round(selected.bbox.height)} pt</dd></div><div><dt>Direction</dt><dd>{selected.direction}</dd></div></dl><div className="inspector-buttons"><button onClick={onDuplicate}>Duplicate</button><button className="danger" onClick={onDelete}>Delete</button></div></div>;
+  if (!canSafelyMutateText(selected)) return <div className="object-inspector locked-text-inspector">
+    <div className="property-heading"><div><span className="eyebrow">Locked source text</span><h2>Review only</h2></div><span className={`source-pill ${selected.source}`}>{selected.source}</span></div>
+    <label className="field-label">Text <textarea value={selected.text} readOnly dir={selected.direction === "auto" ? undefined : selected.direction} /></label>
+    <p className="search-hint">{selected.source === "ocr"
+      ? "This scan has no glyph-accurate cleanup mask, so editing or deleting it could erase nearby rules, logos, or image detail."
+      : "The source paint order could not be verified safely, so editing is locked to prevent text from jumping above nearby graphics."}</p>
+    <div className="confidence-card"><span>Extraction confidence</span><strong>{formatConfidence(selected.confidence)}</strong><i><b style={{ width: `${selected.confidence * 100}%` }} /></i></div>
+    <div className="inspector-buttons"><button onClick={onDuplicate}>Duplicate as editable text</button></div>
+  </div>;
+  const knownFont = selected.style.fontFamily.includes("Noto")
+    ? "arabic"
+    : selected.style.fontFamily.includes("Arial")
+      ? "arial"
+      : selected.style.fontFamily.includes("Inter")
+        ? "inter"
+        : selected.style.fontFamily.includes("Times")
+          ? "times"
+          : selected.style.fontFamily.includes("Courier")
+            ? "courier"
+            : selected.style.fontFamily.includes("Helvetica")
+              ? "helvetica"
+              : "source";
+  const fontFamilies: Record<string, string> = {
+    inter: "Inter, Arial, sans-serif",
+    arabic: "Noto Naskh Arabic, Arial, sans-serif",
+    arial: "Arial, sans-serif",
+    helvetica: "Helvetica, Arial, sans-serif",
+    times: '"Times New Roman", Times, serif',
+    courier: '"Courier New", Courier, monospace',
+  };
   return <div className="object-inspector">
     <div className="property-heading"><div><span className="eyebrow">Text block</span><h2>Content & type</h2></div><span className={`source-pill ${selected.source}`}>{selected.source}</span></div>
     <label className="field-label">Text <textarea value={selected.text} dir={selected.direction === "auto" ? undefined : selected.direction} onChange={(event) => onTextChange(event.target.value)} /></label>
     <div className="field-grid">
-      <label className="field-label">Font <select value={selected.style.fontFamily.includes("Noto") ? "arabic" : selected.style.fontFamily.includes("Arial") ? "arial" : "inter"} onChange={(event) => onStyleChange({ fontFamily: event.target.value === "arabic" ? "Noto Naskh Arabic, Arial, sans-serif" : event.target.value === "arial" ? "Arial, sans-serif" : "Inter, Arial, sans-serif" })}><option value="inter">Inter</option><option value="arabic">Arabic</option><option value="arial">Arial</option></select></label>
-      <label className="field-label">Size <input type="number" min="7" max="72" value={Math.round(selected.style.fontSize)} onChange={(event) => onStyleChange({ fontSize: Number(event.target.value) || 12 })} /></label>
+      <label className="field-label">Font <select value={knownFont} onChange={(event) => { const family = fontFamilies[event.target.value]; if (family) onStyleChange({ fontFamily: family }); }}>{knownFont === "source" && <option value="source">Original · {selected.sourceFontName ?? selected.style.fontFamily.replace(/["']/g, "").split(",")[0]}</option>}<option value="inter">Inter</option><option value="helvetica">Helvetica</option><option value="times">Times</option><option value="courier">Courier</option><option value="arabic">Arabic</option><option value="arial">Arial</option></select></label>
+      <label className="field-label">Size <input type="number" min="1" max="400" step="0.1" value={Math.round(selected.style.fontSize * 10) / 10} onChange={(event) => onStyleChange({ fontSize: clamp(Number(event.target.value) || 12, 1, 400) })} /></label>
     </div>
     <div className="format-strip"><button className={selected.style.fontWeight >= 600 ? "is-on" : ""} onClick={() => onStyleChange({ fontWeight: selected.style.fontWeight >= 600 ? 400 : 700 })}><b>B</b></button><button className={selected.style.fontStyle === "italic" ? "is-on" : ""} onClick={() => onStyleChange({ fontStyle: selected.style.fontStyle === "italic" ? "normal" : "italic" })}><i>I</i></button><input aria-label="Text color" type="color" value={selected.style.color} onChange={(event) => onStyleChange({ color: event.target.value })} /><span /></div>
     <div className="field-grid">
@@ -756,7 +810,9 @@ function LayersPanel({ page, selectedId, onSelect }: { page: EditableDocument["p
 function ReviewPanel({ page, readiness }: { page: EditableDocument["pages"][number]; readiness: ReturnType<typeof getExportReadiness> }) {
   const uncertain = page.objects.filter((object) => object.confidence < 0.9);
   const ocrTextCount = page.objects.filter((object) => object.type === "text" && object.source === "ocr").length;
-  return <div className="review-panel"><div className="panel-heading"><span className="eyebrow">Quality gate</span><h2>Recognition review</h2></div><div className="review-hero"><span>{page.sourceKind === "native" ? "Native source" : page.sourceKind === "hybrid" ? "Hybrid source" : "Scanned source"}</span><strong>{page.nativeTextCount + ocrTextCount} text objects</strong><small>{ocrTextCount ? `Local Arabic + English OCR · 300 dpi · ${ocrTextCount} blocks` : `${page.imageCount} image operations detected`}</small></div><div className="review-list">{uncertain.length ? uncertain.map((object) => <div key={object.id}><span className="warning-dot" /><p><strong>{objectLabel(object)}</strong><small>{formatConfidence(object.confidence)} confidence · {object.source}</small></p><button>Review</button></div>) : <div className="review-clear"><span>✓</span><p>All current objects meet the review threshold.</p></div>}</div><div className={`export-readiness ${readiness.canExport ? "ready" : "held"}`}><span>{readiness.canExport ? "Export ready" : "Export held"}</span>{readiness.messages.map((message) => <p key={message}>{message}</p>)}</div></div>;
+  const exportAvailable = readiness.canExport || readiness.canFlatten;
+  const readinessLabel = readiness.canExport ? "Export ready" : readiness.canFlatten ? "Visual export ready" : "Export blocked";
+  return <div className="review-panel"><div className="panel-heading"><span className="eyebrow">Quality gate</span><h2>Recognition review</h2></div><div className="review-hero"><span>{page.sourceKind === "native" ? "Native source" : page.sourceKind === "hybrid" ? "Hybrid source" : "Scanned source"}</span><strong>{page.nativeTextCount + ocrTextCount} text objects</strong><small>{ocrTextCount ? `Local Arabic + English OCR · 300 dpi · ${ocrTextCount} blocks` : `${page.imageCount} image operations detected`}</small></div><div className="review-list">{uncertain.length ? uncertain.map((object) => <div key={object.id}><span className="warning-dot" /><p><strong>{objectLabel(object)}</strong><small>{formatConfidence(object.confidence)} confidence · {object.source}</small></p><button>Review</button></div>) : <div className="review-clear"><span>✓</span><p>All current objects meet the review threshold.</p></div>}</div><div className={`export-readiness ${exportAvailable ? "ready" : "held"}`}><span>{readinessLabel}</span>{readiness.messages.map((message) => <p key={message}>{message}</p>)}</div></div>;
 }
 
 function SearchPanel({ search, setSearch, document, onReplaceAll, onSelect }: { search: string; setSearch: (value: string) => void; document: EditableDocument; onReplaceAll: (replacement: string) => void; onSelect: (id: string) => void }) {

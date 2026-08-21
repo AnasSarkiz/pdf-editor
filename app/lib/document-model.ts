@@ -52,15 +52,52 @@ export interface SemanticObjectBase {
   locked?: boolean;
 }
 
+export interface SourceForegroundOcclusion {
+  /** Later PDF.js rendering operation that originally painted above this text. */
+  operatorIndex: number;
+  /** Conservative page-space geometry for clipping reconstructed text. */
+  bbox: Rect;
+}
+
 export interface TextBlock extends SemanticObjectBase {
   type: "text";
   text: string;
+  /** True only when PDF text/font/order/geometry identify one source run. */
+  sourceMappingVerified?: boolean;
+  /** Evidence used for the verified source mapping. */
+  sourceMappingMethod?: "recorded-bounds" | "exact-glyph-run";
+  /**
+   * Whether later source paint is fully represented by rectangular clipping
+   * metadata. `bounded-risk` consumers must reject replacement bounds that
+   * intersect `sourceUnsafeForegroundBounds`; deletion remains safe.
+   */
+  sourceEditSafety?: "safe" | "bounded-risk" | "unbounded-risk" | "unmapped";
+  /** Immutable bounds measured from the source PDF text item. */
+  sourceBbox?: Rect;
+  /** Final PDF.js text paint operation in the safely matched source run. */
+  sourceOperatorIndex?: number;
+  /** Every PDF.js text paint operation in the safely matched source run. */
+  sourceOperatorIndices?: number[];
+  /** Human-readable source font name when the PDF exposes one. */
+  sourceFontName?: string;
+  /** Non-text source paint geometry that originally appeared above this run. */
+  sourceForegroundOcclusions?: SourceForegroundOcclusion[];
+  /**
+   * Bounds of later visible paints that cannot be represented as opaque
+   * rectangles (for example alpha images, gradients, and curved paths).
+   */
+  sourceUnsafeForegroundBounds?: Rect[];
   /** Immutable source placement used to remove moved native text from the page preview. */
   originalBbox?: Rect;
   /** Immutable source formatting used to detect native text changes safely. */
   originalStyle?: TextStyle;
   /** Source rotation in screen-space degrees for reconstruction decisions. */
   originalRotation?: number;
+  /** Source paragraph direction used to detect bidi-only native text edits. */
+  originalDirection?: TextDirection;
+  /** Source font metrics when exposed by the PDF parser. */
+  fontAscent?: number;
+  fontDescent?: number;
   style: TextStyle;
   originalText?: string;
   overflow: "shrink" | "expand" | "reflow" | "allow" | "warn";
@@ -120,8 +157,12 @@ export interface DocumentPage {
   height: number;
   rotation: number;
   background?: string;
+  /** The same source page rendered without native text paint operations. */
+  cleanBackground?: string;
   sourceKind: "native" | "scan" | "hybrid";
   objects: PageObject[];
+  /** Canvas-backed text removed from `objects`, retained for source restoration and undo/export. */
+  deletedSourceText?: TextBlock[];
   nativeTextCount: number;
   imageCount: number;
   analysisStatus: "queued" | "ready" | "needs-review";
@@ -237,11 +278,13 @@ export function createDemoDocument(): EditableDocument {
   };
   const text = (value: string, bbox: Rect, style: Partial<TextStyle> = {}, source: ObjectSource = "native-pdf"): TextBlock => {
     const resolvedStyle = { ...defaultTextStyle, ...style };
+    const textMeta = detectTextMeta(value);
     return {
     id: stableId("text"),
     type: "text",
     pageId,
     bbox,
+    sourceBbox: { ...bbox },
     originalBbox: { ...bbox },
     rotation: 0,
     originalRotation: 0,
@@ -250,7 +293,8 @@ export function createDemoDocument(): EditableDocument {
     source,
     zIndex: 2,
     relationships: [],
-    ...detectTextMeta(value),
+    ...textMeta,
+    originalDirection: textMeta.direction,
     text: value,
     originalText: value,
     style: resolvedStyle,

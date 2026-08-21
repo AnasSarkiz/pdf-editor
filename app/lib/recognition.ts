@@ -56,31 +56,44 @@ export function textFromOcrToken(pageId: string, token: OcrToken): TextBlock {
     width: Math.max(...xs) - Math.min(...xs),
     height: Math.max(...ys) - Math.min(...ys),
   };
+  const style = {
+    fontFamily: "Noto Naskh Arabic, Arial, sans-serif",
+    fontSize: Math.max(9, bbox.height * 0.82),
+    fontWeight: 400,
+    fontStyle: "normal" as const,
+    color: "#172026",
+    lineHeight: 1.35,
+    letterSpacing: 0,
+    align: token.direction === "rtl" ? "right" as const : "left" as const,
+  };
   return {
     id: stableId("ocr-text"),
     type: "text",
     pageId,
     bbox,
+    sourceBbox: { ...bbox },
+    originalBbox: { ...bbox },
     rotation: 0,
+    originalRotation: 0,
     transform: identityMatrix,
     confidence: token.confidence,
     source: "ocr",
     zIndex: 1,
     relationships: [],
     ...detectTextMeta(token.text),
+    originalDirection: token.direction,
+    fontAscent: 0.82,
+    fontDescent: -0.18,
     text: token.text,
     originalText: token.text,
-    editable: true,
+    // OCR currently provides a line rectangle, not a glyph-accurate source
+    // mask. Keep the semantic text searchable/selectable, but do not present
+    // destructive source cleanup as safe: colour-based rectangular inpainting
+    // can retain light glyphs or erase same-coloured rules and logos.
+    editable: false,
+    locked: true,
     overflow: "warn",
-    style: {
-      fontFamily: "Noto Naskh Arabic, Arial, sans-serif",
-      fontSize: Math.max(9, bbox.height * 0.82),
-      fontWeight: 400,
-      fontStyle: "normal",
-      color: "#172026",
-      lineHeight: 1.35,
-      letterSpacing: 0,
-      align: token.direction === "rtl" ? "right" : "left",
-    },
+    style,
+    originalStyle: { ...style },
   };
 }
