@@ -5,11 +5,131 @@ import { detectScannedPage, inferReadingOrder, textFromOcrToken } from "./recogn
 
 type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
 type PdfPageProxy = import("pdfjs-dist/types/src/display/api").PDFPageProxy;
+type PdfDocumentProxy = import("pdfjs-dist/types/src/display/api").PDFDocumentProxy;
+type PdfDocumentLoadingTask = import("pdfjs-dist/types/src/display/api").PDFDocumentLoadingTask;
 
 // 216 dpi source pages keep the browser view and flattened fallback export
 // sharp enough for business documents without rendering at full print size.
+// The requested scales are subsequently reduced when a page would exceed the
+// device-aware pixel budget below.
 const PREVIEW_RENDER_SCALE = 3;
 const OCR_RENDER_SCALE = 300 / 72;
+
+const IMPORT_TIMEOUT_MS = {
+  fileRead: 30_000,
+  engine: 30_000,
+  documentOpen: 45_000,
+  metadata: 15_000,
+  pageOpen: 20_000,
+  textContent: 30_000,
+  operatorList: 45_000,
+  annotations: 15_000,
+  render: 45_000,
+  pngEncode: 30_000,
+  ocrSetup: 90_000,
+  ocrRecognize: 120_000,
+  fonts: 3_000,
+  cleanup: 5_000,
+} as const;
+
+interface RenderLimits {
+  previewPixels: number;
+  ocrPixels: number;
+  maxDimension: number;
+}
+
+const DESKTOP_RENDER_LIMITS: RenderLimits = {
+  previewPixels: 8_000_000,
+  ocrPixels: 12_000_000,
+  maxDimension: 16_384,
+};
+
+const CONSTRAINED_RENDER_LIMITS: RenderLimits = {
+  // Roughly 12 MiB and 20 MiB of raw RGBA respectively. A native page can
+  // require both its normal and text-free preview at the same time.
+  previewPixels: 3_000_000,
+  ocrPixels: 5_000_000,
+  maxDimension: 8_192,
+};
+
+class PdfImportTimeoutError extends Error {
+  constructor(stage: string, timeoutMs: number) {
+    super(`PDF import timed out while ${stage} after ${Math.ceil(timeoutMs / 1_000)} seconds.`);
+    this.name = "PdfImportTimeoutError";
+  }
+}
+
+function withStageTimeout<T>(
+  operation: PromiseLike<T>,
+  timeoutMs: number,
+  stage: string,
+  onTimeout?: () => void,
+): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return Promise.resolve(operation);
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        onTimeout?.();
+      } catch {
+        // Timeout cleanup is best effort; the stage error is the actionable one.
+      }
+      reject(new PdfImportTimeoutError(stage, timeoutMs));
+    }, timeoutMs);
+    Promise.resolve(operation).then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function isConstrainedDevice(): boolean {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return false;
+  const memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
+  const narrowViewport = window.innerWidth > 0 && window.innerWidth <= 900;
+  const coarsePointer = typeof window.matchMedia === "function"
+    && window.matchMedia("(pointer: coarse) and (max-width: 1100px)").matches;
+  return narrowViewport || coarsePointer || (typeof memory === "number" && memory <= 4);
+}
+
+function currentRenderLimits(): RenderLimits {
+  return isConstrainedDevice() ? CONSTRAINED_RENDER_LIMITS : DESKTOP_RENDER_LIMITS;
+}
+
+function boundedRenderScale(
+  width: number,
+  height: number,
+  requestedScale: number,
+  maxPixels: number,
+  maxDimension: number,
+): number {
+  if (![width, height, requestedScale, maxPixels, maxDimension].every(Number.isFinite)
+    || width <= 0 || height <= 0 || requestedScale <= 0 || maxPixels <= 0 || maxDimension <= 0) {
+    throw new Error("The PDF page has invalid render dimensions.");
+  }
+  const areaScale = Math.sqrt(maxPixels / (width * height));
+  const dimensionScale = Math.min(maxDimension / width, maxDimension / height);
+  return Math.max(0.01, Math.min(requestedScale, areaScale, dimensionScale));
+}
+
+function createPdfByteCopies(buffer: ArrayBuffer): { bytes: Uint8Array; pdfData: Uint8Array } {
+  const bytes = new Uint8Array(buffer);
+  // PDF.js transfers `data.buffer` to its worker and detaches it on the main
+  // thread. Keep a separate owned copy for direct export.
+  return { bytes, pdfData: bytes.slice() };
+}
 
 interface NativeTextItem {
   str: string;
@@ -37,6 +157,18 @@ interface NativeFont {
   italic?: boolean;
   ascent?: number;
   descent?: number;
+}
+
+interface PdfJsFontLoader {
+  nativeFontFaces?: Set<FontFace>;
+}
+
+interface PdfDocumentWithFontLoader {
+  _transport?: { fontLoader?: PdfJsFontLoader };
+}
+
+interface FontLoadSet {
+  load: (font: string, text?: string) => PromiseLike<unknown>;
 }
 
 interface RecordedOperationBounds {
@@ -121,6 +253,55 @@ async function getPdfJs(): Promise<PdfJsModule> {
     ).toString();
   }
   return pdfjs;
+}
+
+let retainedPdfFontFaces = new Set<FontFace>();
+
+function detachPdfFontFaces(pdf: PdfDocumentProxy): Set<FontFace> {
+  if (typeof document === "undefined" || !document.fonts) return new Set();
+  const loader = (pdf as unknown as PdfDocumentWithFontLoader)._transport?.fontLoader;
+  if (!loader?.nativeFontFaces) return new Set();
+  const retained = new Set(loader.nativeFontFaces);
+  // PDFDocumentLoadingTask.destroy() clears the loader's registered faces.
+  // These faces are still needed by the returned semantic blocks, whose CSS
+  // family names intentionally point at PDF.js' embedded subset fonts.
+  for (const face of retained) loader.nativeFontFaces.delete(face);
+  return retained;
+}
+
+function replaceRetainedPdfFontFaces(next: Set<FontFace>): void {
+  if (typeof document !== "undefined" && document.fonts) {
+    for (const face of retainedPdfFontFaces) document.fonts.delete(face);
+  }
+  retainedPdfFontFaces = next;
+}
+
+async function optionalStage<T>(
+  operation: PromiseLike<T>,
+  timeoutMs: number,
+  stage: string,
+  fallback: T,
+): Promise<T> {
+  try {
+    return await withStageTimeout(operation, timeoutMs, stage);
+  } catch (error) {
+    // A timeout usually means the worker itself is wedged. Do not continue to
+    // enqueue work behind it; ordinary malformed optional metadata may fall
+    // back without preventing the visible page from opening.
+    if (error instanceof PdfImportTimeoutError) throw error;
+    return fallback;
+  }
+}
+
+async function boundedCleanup(operation: PromiseLike<unknown> | undefined, stage: string): Promise<void> {
+  if (!operation) return;
+  await withStageTimeout(operation, IMPORT_TIMEOUT_MS.cleanup, stage).catch(() => undefined);
+}
+
+function releaseCanvas(canvas: HTMLCanvasElement | null | undefined): void {
+  if (!canvas) return;
+  canvas.width = 0;
+  canvas.height = 0;
 }
 
 function matrixFrom(transform: number[]): Matrix {
@@ -223,6 +404,7 @@ type InternalTextPaintAppearance = TextPaintAppearance & { [textAppearanceRunId]
 
 function extractTextPaintAppearances(pdfjs: PdfJsModule, fnArray: number[], argsArray: unknown[][]): TextPaintAppearance[] {
   const appearances: TextPaintAppearance[] = [];
+  const textPaintOperations = textPaintOperationSet(pdfjs);
   const stateStack: Array<{ fillColor?: string; fontName?: string }> = [];
   let state: { fillColor?: string; fontName?: string } = { fillColor: "#000000" };
   let nextRunId = 0;
@@ -262,7 +444,7 @@ function extractTextPaintAppearances(pdfjs: PdfJsModule, fnArray: number[], args
       // movement, text-state changes, and arbitrary operators start a new run.
       const verticalAdvance = args?.[1];
       if (!canContinueRun || typeof verticalAdvance !== "number" || Math.abs(verticalAdvance) > 1e-6) breakRun();
-    } else if (textPaintOperationSet(pdfjs).has(operation)) {
+    } else if (textPaintOperations.has(operation)) {
       const continuesHorizontally = operation === pdfjs.OPS.showText || operation === pdfjs.OPS.showSpacedText;
       if (!canContinueRun || !continuesHorizontally) currentRunId = nextRunId++;
       const payload = operation === pdfjs.OPS.nextLineSetSpacingShowText ? args?.[2] : args?.[0];
@@ -916,15 +1098,37 @@ function matchTextAppearances(
   pageWidth: number,
   pageHeight: number,
 ): Array<MatchedTextPaintAppearance | undefined> {
+  const appearanceIndexesByFont = new Map<string, number[]>();
+  for (let index = 0; index < appearances.length; index += 1) {
+    const fontName = appearances[index].fontName;
+    if (!fontName) continue;
+    const indexes = appearanceIndexesByFont.get(fontName) ?? [];
+    indexes.push(index);
+    appearanceIndexesByFont.set(fontName, indexes);
+  }
+  const sourceBoundsCache = new Map<number, Rect | undefined>();
+  const cachedSourceBounds = (operatorIndex: number): Rect | undefined => {
+    if (!sourceBoundsCache.has(operatorIndex)) sourceBoundsCache.set(operatorIndex, sourceBounds(operatorIndex));
+    return sourceBoundsCache.get(operatorIndex);
+  };
   let lastOperatorIndex = -1;
   return targets.map((target) => {
     const wanted = normalizedText(target.text);
     if (!wanted || !target.fontName) return undefined;
+    const fontAppearanceIndexes = appearanceIndexesByFont.get(target.fontName);
+    if (!fontAppearanceIndexes?.length) return undefined;
+    let firstAvailable = 0;
+    let upper = fontAppearanceIndexes.length;
+    while (firstAvailable < upper) {
+      const middle = (firstAvailable + upper) >>> 1;
+      if (appearances[fontAppearanceIndexes[middle]].operatorIndex <= lastOperatorIndex) firstAvailable = middle + 1;
+      else upper = middle;
+    }
     const exactCandidates: MatchedTextPaintAppearance[] = [];
     const normalizedCandidates: MatchedTextPaintAppearance[] = [];
-    for (let start = 0; start < appearances.length; start += 1) {
+    for (let candidateIndex = firstAvailable; candidateIndex < fontAppearanceIndexes.length; candidateIndex += 1) {
+      const start = fontAppearanceIndexes[candidateIndex];
       const first = appearances[start] as InternalTextPaintAppearance;
-      if (first.operatorIndex <= lastOperatorIndex || first.fontName !== target.fontName) continue;
       const runId = first[textAppearanceRunId];
       const operatorIndices: number[] = [];
       const bounds: Rect[] = [];
@@ -939,7 +1143,7 @@ function matchTextAppearances(
         ) break;
         text += appearance.text;
         operatorIndices.push(appearance.operatorIndex);
-        const sourceBbox = sourceBounds(appearance.operatorIndex);
+        const sourceBbox = cachedSourceBounds(appearance.operatorIndex);
         if (sourceBbox) bounds.push(sourceBbox);
         else if (normalizedText(appearance.text)) break;
         if (normalizedText(text) !== wanted) continue;
@@ -959,9 +1163,15 @@ function matchTextAppearances(
           sourceBbox: recordedBoundsMatch ? combinedBounds! : { ...target.bbox },
           mappingMethod: recordedBoundsMatch ? "recorded-bounds" : "exact-glyph-run",
         };
-        if (exactText) exactCandidates.push(candidate);
-        else normalizedCandidates.push(candidate);
+        if (exactText) {
+          exactCandidates.push(candidate);
+          // Two geometry-validated exact candidates are already irreducibly
+          // ambiguous; scanning the rest of a glyph-heavy page cannot recover
+          // a safe assignment.
+          if (exactCandidates.length > 1) break;
+        } else if (normalizedCandidates.length < 2) normalizedCandidates.push(candidate);
       }
+      if (exactCandidates.length > 1) break;
     }
     const candidates = exactCandidates.length ? exactCandidates : normalizedCandidates;
     // Repeated identical paint operations can overlap (shadow/faux-bold text).
@@ -1010,6 +1220,41 @@ function sourceFontWeight(font: NativeFont | undefined): number {
   return 400;
 }
 
+function nativeFontLoadRequests(blocks: TextBlock[]): Array<{ font: string; text: string }> {
+  const requests = new Map<string, { font: string; characters: Set<string> }>();
+  for (const block of blocks) {
+    const key = `${block.style.fontStyle}|${block.style.fontWeight}|${block.style.fontFamily}`;
+    const request = requests.get(key) ?? {
+      // Font face selection is independent of point size. A stable size lets
+      // every block using the same embedded face share one load request.
+      font: `${block.style.fontStyle} ${block.style.fontWeight} 16px ${block.style.fontFamily}`,
+      characters: new Set<string>(),
+    };
+    for (const character of block.text) {
+      if (request.characters.size >= 512) break;
+      request.characters.add(character);
+    }
+    requests.set(key, request);
+  }
+  return [...requests.values()].map((request) => ({
+    font: request.font,
+    text: [...request.characters].join(""),
+  }));
+}
+
+async function loadNativeTextFonts(
+  blocks: TextBlock[],
+  fontSet: FontLoadSet | undefined = typeof document !== "undefined" ? document.fonts : undefined,
+  timeoutMs: number = IMPORT_TIMEOUT_MS.fonts,
+): Promise<void> {
+  if (!fontSet) return;
+  const requests = nativeFontLoadRequests(blocks);
+  const loads = requests.map(({ font, text }) => Promise.resolve().then(() => fontSet.load(font, text)));
+  // Font loading improves width inference but is not allowed to hold the
+  // document-open promise forever. Any late loads remain browser-managed.
+  await withStageTimeout(Promise.allSettled(loads), timeoutMs, "loading embedded PDF fonts").catch(() => undefined);
+}
+
 /** Pure matching helpers exposed for focused regression tests. */
 export const pdfCoreTesting = {
   extractTextPaintAppearances,
@@ -1022,6 +1267,11 @@ export const pdfCoreTesting = {
   sourceForegroundOcclusions,
   nativeSourceSafety,
   renderedTextColor,
+  boundedRenderScale,
+  createPdfByteCopies,
+  nativeFontLoadRequests,
+  loadNativeTextFonts,
+  withStageTimeout,
 };
 
 function nativeTextToBlock(
@@ -1110,21 +1360,73 @@ function annotationToField(pageId: string, annotation: NativeAnnotation, pageHei
   };
 }
 
-async function renderPageCanvas(page: PdfPageProxy, scale: number, options: { recordOperations?: boolean; operationsFilter?: (index: number) => boolean } = {}): Promise<HTMLCanvasElement> {
+interface RenderPageCanvasOptions {
+  recordOperations?: boolean;
+  operationsFilter?: (index: number) => boolean;
+  purpose?: "preview" | "ocr";
+}
+
+async function renderPageCanvas(page: PdfPageProxy, requestedScale: number, options: RenderPageCanvasOptions = {}): Promise<HTMLCanvasElement> {
+  const { purpose = "preview", ...renderOptions } = options;
+  const baseViewport = page.getViewport({ scale: 1 });
+  const limits = currentRenderLimits();
+  const maxPixels = purpose === "ocr" ? limits.ocrPixels : limits.previewPixels;
+  const scale = boundedRenderScale(baseViewport.width, baseViewport.height, requestedScale, maxPixels, limits.maxDimension);
   const viewport = page.getViewport({ scale });
   const canvas = document.createElement("canvas");
   canvas.width = Math.ceil(viewport.width);
   canvas.height = Math.ceil(viewport.height);
   const context = canvas.getContext("2d", { alpha: false });
   if (!context) throw new Error("Canvas rendering is unavailable in this browser.");
-  await page.render({ canvas, canvasContext: context, viewport, ...options }).promise;
-  return canvas;
+  const renderTask = page.render({ canvas, canvasContext: context, viewport, ...renderOptions });
+  try {
+    await withStageTimeout(
+      renderTask.promise,
+      IMPORT_TIMEOUT_MS.render,
+      `rendering page ${page.pageNumber}`,
+      () => renderTask.cancel(),
+    );
+    return canvas;
+  } catch (error) {
+    releaseCanvas(canvas);
+    throw error;
+  }
 }
 
-function canvasPng(canvas: HTMLCanvasElement): string {
+function blobDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === "string"
+      ? resolve(reader.result)
+      : reject(new Error("The page preview could not be encoded."));
+    reader.onerror = () => reject(reader.error ?? new Error("The page preview could not be encoded."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function canvasPng(canvas: HTMLCanvasElement, pageNumber: number): Promise<string> {
   // Keep the original page and committed canvas text at the same quality.
   // JPEG artifacts made replacement text look different from the source page.
-  return canvas.toDataURL("image/png");
+  if (typeof canvas.toBlob !== "function" || typeof FileReader === "undefined") return canvas.toDataURL("image/png");
+  const blob = await withStageTimeout(
+    new Promise<Blob>((resolve, reject) => {
+      try {
+        canvas.toBlob(
+          (value) => value ? resolve(value) : reject(new Error("The page preview could not be encoded.")),
+          "image/png",
+        );
+      } catch (error) {
+        reject(error);
+      }
+    }),
+    IMPORT_TIMEOUT_MS.pngEncode,
+    `encoding page ${pageNumber}`,
+  );
+  return withStageTimeout(
+    blobDataUrl(blob),
+    IMPORT_TIMEOUT_MS.pngEncode,
+    `serializing page ${pageNumber}`,
+  );
 }
 
 function rotatedRectBounds(bounds: Rect, rotation: number): Rect {
@@ -1262,9 +1564,12 @@ async function refineNativeTextBlocks(
       fontStyle,
       ...(appearance?.color ? { color: appearance.color } : {}),
     };
-    if (typeof document !== "undefined" && document.fonts) {
-      await document.fonts.load(`${block.style.fontStyle} ${block.style.fontWeight} ${block.style.fontSize}px ${block.style.fontFamily}`, block.text).catch(() => []);
-    }
+  }
+  await loadNativeTextFonts(blocks);
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    const item = items[index];
+    const appearance = matches[index];
     if (context && Array.from(block.text).length > 1) {
       context.font = `${block.style.fontStyle} ${block.style.fontWeight} ${block.style.fontSize * pixelScale}px ${block.style.fontFamily}`;
       const verticalScale = Math.max(0.001, Math.hypot(block.transform.c, block.transform.d));
@@ -1310,121 +1615,220 @@ export interface PdfLoadProgress {
 }
 
 export async function importPdf(file: File, onProgress?: (progress: PdfLoadProgress) => void): Promise<{ document: EditableDocument; bytes: Uint8Array }> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const pdfjs = await getPdfJs();
   onProgress?.({ phase: "opening", completed: 0, total: 1 });
-  const loadingTask = pdfjs.getDocument({ data: bytes, disableAutoFetch: true, useWorkerFetch: false });
-  const pdf = await loadingTask.promise;
-  const metadata = await pdf.getMetadata().catch(() => null);
-  const pages: DocumentPage[] = [];
+  const fileBuffer = await withStageTimeout(file.arrayBuffer(), IMPORT_TIMEOUT_MS.fileRead, "reading the PDF file");
+  const { bytes, pdfData } = createPdfByteCopies(fileBuffer);
+  const pdfjs = await withStageTimeout(getPdfJs(), IMPORT_TIMEOUT_MS.engine, "loading the PDF engine");
+  const renderLimits = currentRenderLimits();
+  let loadingTask: PdfDocumentLoadingTask | undefined;
+  let destroyTask: Promise<void> | undefined;
+  let pdf: PdfDocumentProxy | undefined;
   let localOcr: LocalOcrSession | null = null;
+  let completed = false;
+
+  const requestLoadingTaskDestroy = (): Promise<void> | undefined => {
+    if (!loadingTask) return undefined;
+    destroyTask ??= Promise.resolve().then(() => loadingTask!.destroy());
+    return destroyTask;
+  };
 
   try {
-  for (let index = 1; index <= pdf.numPages; index += 1) {
-    onProgress?.({ phase: "extracting", completed: index - 1, total: pdf.numPages });
-    const sourcePage = await pdf.getPage(index);
-    const viewport = sourcePage.getViewport({ scale: 1 });
-    const pageId = stableId("page");
-    const textContent = await sourcePage.getTextContent({ includeMarkedContent: true });
-    const nativeItems = textContent.items.filter(
-      (item): item is NativeTextItem => "str" in item && typeof item.str === "string" && item.str.trim().length > 0,
-    );
-    const operatorList = await sourcePage.getOperatorList().catch(() => null);
-    const operators = operatorList?.fnArray ?? [];
-    const operatorArgs = (operatorList?.argsArray ?? []) as unknown as unknown[][];
-    const appearances = extractTextPaintAppearances(pdfjs, operators, operatorArgs);
-    // Path data is replaced with Path2D objects during rendering, so capture
-    // stroke segments and their CTM before requesting recorded operation bounds.
-    const foregroundPaintCandidates = extractForegroundPaintCandidates(pdfjs, operators, operatorArgs, viewport.transform);
-    const nativeBlocks = nativeItems.map((item, itemIndex) => nativeTextToBlock(
-      pageId,
-      item,
-      textContent.styles[item.fontName] as NativeTextStyle | undefined,
-      viewport.transform,
-      viewport.width,
-      itemIndex + 1,
-    ));
-    const imageCount = operators.filter(
-      (operation) => operation === pdfjs.OPS.paintImageXObject
-        || operation === pdfjs.OPS.paintInlineImageXObject
-        || operation === pdfjs.OPS.paintInlineImageXObjectGroup
-        || operation === pdfjs.OPS.paintImageXObjectRepeat,
-    ).length;
-    const annotations = (await sourcePage.getAnnotations().catch(() => [])) as unknown as NativeAnnotation[];
-    const fields = annotations
-      .map((annotation, fieldIndex) => annotationToField(pageId, annotation, viewport.height, nativeBlocks.length + fieldIndex + 1))
-      .filter((field): field is FormFieldObject => field !== null);
-    const sourceKind = detectScannedPage(nativeBlocks.length, imageCount);
-    let ocrBlocks: TextBlock[] = [];
-    if (sourceKind === "scan") {
-      onProgress?.({ phase: "recognizing", completed: index - 1, total: pdf.numPages });
-      try {
-        localOcr ??= await createHighResolutionOcrSession();
-        const ocrCanvas = await renderPageCanvas(sourcePage, OCR_RENDER_SCALE);
-        const tokens = await localOcr.recognize(ocrCanvas, viewport);
-        ocrBlocks = tokens.map((token) => textFromOcrToken(pageId, token));
-      } catch {
-        // A local model failure must not prevent a document from opening. The
-        // empty scan remains explicitly marked for manual OCR review.
-        ocrBlocks = [];
-      }
-      onProgress?.({ phase: "recognizing", completed: index, total: pdf.numPages });
-    }
-    onProgress?.({ phase: "rendering", completed: index - 1, total: pdf.numPages });
-    const previewCanvas = await renderPageCanvas(sourcePage, PREVIEW_RENDER_SCALE, { recordOperations: true });
-    await refineNativeTextBlocks(sourcePage, previewCanvas, viewport.height, nativeItems, nativeBlocks, appearances, foregroundPaintCandidates);
-    const textOperations = textPaintOperationSet(pdfjs);
-    const cleanCanvas = nativeBlocks.length
-      ? await renderPageCanvas(sourcePage, PREVIEW_RENDER_SCALE, { operationsFilter: (operatorIndex) => !textOperations.has(operators[operatorIndex]) })
-      : null;
-    if (cleanCanvas) {
-      for (const block of nativeBlocks) {
-        if (block.sourceOperatorIndex !== undefined) continue;
-        const color = renderedTextColor(previewCanvas, cleanCanvas, block, viewport.width, viewport.height);
-        if (!color) continue;
-        block.style = { ...block.style, color };
-        block.originalStyle = { ...block.style };
-      }
-    }
-    const objects = inferReadingOrder([...nativeBlocks, ...ocrBlocks]);
-    const hasUncertainNativeText = nativeBlocks.some((block) => !block.sourceMappingVerified);
-    pages.push({
-      id: pageId,
-      number: index,
-      width: viewport.width,
-      height: viewport.height,
-      rotation: sourcePage.rotate,
-      background: canvasPng(previewCanvas),
-      ...(cleanCanvas ? { cleanBackground: canvasPng(cleanCanvas) } : {}),
-      sourceKind,
-      objects: [...objects, ...fields],
-      nativeTextCount: nativeBlocks.length,
-      imageCount,
-      analysisStatus: hasUncertainNativeText || (!nativeBlocks.length && !ocrBlocks.length) ? "needs-review" : "ready",
+    loadingTask = pdfjs.getDocument({
+      data: pdfData,
+      disableAutoFetch: true,
+      useWorkerFetch: false,
+      canvasMaxAreaInBytes: Math.max(renderLimits.previewPixels, renderLimits.ocrPixels) * 4,
     });
-    onProgress?.({ phase: "rendering", completed: index, total: pdf.numPages });
-  }
+    pdf = await withStageTimeout(
+      loadingTask.promise,
+      IMPORT_TIMEOUT_MS.documentOpen,
+      "opening the PDF document",
+      () => { void requestLoadingTaskDestroy()?.catch(() => undefined); },
+    );
+    const metadata = await optionalStage(
+      pdf.getMetadata(),
+      IMPORT_TIMEOUT_MS.metadata,
+      "reading PDF metadata",
+      null,
+    );
+    const pages: DocumentPage[] = [];
 
-  const info = metadata?.info as { Title?: string; Author?: string } | undefined;
-  onProgress?.({ phase: "ready", completed: pdf.numPages, total: pdf.numPages });
-  return {
-    bytes,
-    document: {
-      id: stableId("document"),
-      metadata: {
-        filename: file.name,
-        title: info?.Title,
-        author: info?.Author,
-        pageCount: pdf.numPages,
-        createdAt: new Date().toISOString(),
-        processingMode: "browser",
+    for (let index = 1; index <= pdf.numPages; index += 1) {
+      onProgress?.({ phase: "extracting", completed: index - 1, total: pdf.numPages });
+      let sourcePage: PdfPageProxy | undefined;
+      let ocrCanvas: HTMLCanvasElement | null = null;
+      let previewCanvas: HTMLCanvasElement | null = null;
+      let cleanCanvas: HTMLCanvasElement | null = null;
+      try {
+        sourcePage = await withStageTimeout(
+          pdf.getPage(index),
+          IMPORT_TIMEOUT_MS.pageOpen,
+          `opening page ${index}`,
+        );
+        const viewport = sourcePage.getViewport({ scale: 1 });
+        const pageId = stableId("page");
+        const textContent = await withStageTimeout(
+          sourcePage.getTextContent({ includeMarkedContent: true }),
+          IMPORT_TIMEOUT_MS.textContent,
+          `extracting text from page ${index}`,
+        );
+        const nativeItems = textContent.items.filter(
+          (item): item is NativeTextItem => "str" in item && typeof item.str === "string" && item.str.trim().length > 0,
+        );
+        const operatorList = await optionalStage(
+          sourcePage.getOperatorList(),
+          IMPORT_TIMEOUT_MS.operatorList,
+          `reading paint operations from page ${index}`,
+          null,
+        );
+        const operators = operatorList?.fnArray ?? [];
+        const operatorArgs = (operatorList?.argsArray ?? []) as unknown as unknown[][];
+        const appearances = extractTextPaintAppearances(pdfjs, operators, operatorArgs);
+        // Path data is replaced with Path2D objects during rendering, so capture
+        // stroke segments and their CTM before requesting recorded operation bounds.
+        const foregroundPaintCandidates = extractForegroundPaintCandidates(pdfjs, operators, operatorArgs, viewport.transform);
+        const nativeBlocks = nativeItems.map((item, itemIndex) => nativeTextToBlock(
+          pageId,
+          item,
+          textContent.styles[item.fontName] as NativeTextStyle | undefined,
+          viewport.transform,
+          viewport.width,
+          itemIndex + 1,
+        ));
+        const imageCount = operators.filter(
+          (operation) => operation === pdfjs.OPS.paintImageXObject
+            || operation === pdfjs.OPS.paintInlineImageXObject
+            || operation === pdfjs.OPS.paintInlineImageXObjectGroup
+            || operation === pdfjs.OPS.paintImageXObjectRepeat,
+        ).length;
+        const annotations = await optionalStage(
+          sourcePage.getAnnotations() as Promise<NativeAnnotation[]>,
+          IMPORT_TIMEOUT_MS.annotations,
+          `reading annotations from page ${index}`,
+          [],
+        );
+        const fields = annotations
+          .map((annotation, fieldIndex) => annotationToField(pageId, annotation, viewport.height, nativeBlocks.length + fieldIndex + 1))
+          .filter((field): field is FormFieldObject => field !== null);
+        const sourceKind = detectScannedPage(nativeBlocks.length, imageCount);
+        let ocrBlocks: TextBlock[] = [];
+        if (sourceKind === "scan") {
+          onProgress?.({ phase: "recognizing", completed: index - 1, total: pdf.numPages });
+          try {
+            if (!localOcr) {
+              let setupTimedOut = false;
+              const setup = createHighResolutionOcrSession();
+              try {
+                localOcr = await withStageTimeout(
+                  setup,
+                  IMPORT_TIMEOUT_MS.ocrSetup,
+                  "starting local OCR",
+                  () => { setupTimedOut = true; },
+                );
+              } finally {
+                if (setupTimedOut) {
+                  void setup.then((session) => boundedCleanup(session.terminate(), "stopping late local OCR")).catch(() => undefined);
+                }
+              }
+            }
+            ocrCanvas = await renderPageCanvas(sourcePage, OCR_RENDER_SCALE, { purpose: "ocr" });
+            const tokens = await withStageTimeout(
+              localOcr.recognize(ocrCanvas, viewport),
+              IMPORT_TIMEOUT_MS.ocrRecognize,
+              `recognizing page ${index}`,
+            );
+            ocrBlocks = tokens.map((token) => textFromOcrToken(pageId, token));
+          } catch (error) {
+            // A local model failure must not prevent a document from opening.
+            // A timed-out worker is discarded because Tesseract may otherwise
+            // leave its pending recognition promise unresolved indefinitely.
+            if (error instanceof PdfImportTimeoutError && localOcr) {
+              await boundedCleanup(localOcr.terminate(), "stopping timed-out local OCR");
+              localOcr = null;
+            }
+            ocrBlocks = [];
+          } finally {
+            releaseCanvas(ocrCanvas);
+            ocrCanvas = null;
+          }
+          onProgress?.({ phase: "recognizing", completed: index, total: pdf.numPages });
+        }
+        onProgress?.({ phase: "rendering", completed: index - 1, total: pdf.numPages });
+        previewCanvas = await renderPageCanvas(sourcePage, PREVIEW_RENDER_SCALE, { recordOperations: true });
+        await refineNativeTextBlocks(sourcePage, previewCanvas, viewport.height, nativeItems, nativeBlocks, appearances, foregroundPaintCandidates);
+        const textOperations = textPaintOperationSet(pdfjs);
+        cleanCanvas = nativeBlocks.length
+          ? await renderPageCanvas(sourcePage, PREVIEW_RENDER_SCALE, { operationsFilter: (operatorIndex) => !textOperations.has(operators[operatorIndex]) })
+          : null;
+        if (cleanCanvas) {
+          for (const block of nativeBlocks) {
+            if (block.sourceOperatorIndex !== undefined) continue;
+            const color = renderedTextColor(previewCanvas, cleanCanvas, block, viewport.width, viewport.height);
+            if (!color) continue;
+            block.style = { ...block.style, color };
+            block.originalStyle = { ...block.style };
+          }
+        }
+        const objects = inferReadingOrder([...nativeBlocks, ...ocrBlocks]);
+        const hasUncertainNativeText = nativeBlocks.some((block) => !block.sourceMappingVerified);
+        const background = await canvasPng(previewCanvas, index);
+        releaseCanvas(previewCanvas);
+        previewCanvas = null;
+        const cleanBackground = cleanCanvas ? await canvasPng(cleanCanvas, index) : undefined;
+        releaseCanvas(cleanCanvas);
+        cleanCanvas = null;
+        pages.push({
+          id: pageId,
+          number: index,
+          width: viewport.width,
+          height: viewport.height,
+          rotation: sourcePage.rotate,
+          background,
+          ...(cleanBackground ? { cleanBackground } : {}),
+          sourceKind,
+          objects: [...objects, ...fields],
+          nativeTextCount: nativeBlocks.length,
+          imageCount,
+          analysisStatus: hasUncertainNativeText || (!nativeBlocks.length && !ocrBlocks.length) ? "needs-review" : "ready",
+        });
+        onProgress?.({ phase: "rendering", completed: index, total: pdf.numPages });
+      } finally {
+        releaseCanvas(ocrCanvas);
+        releaseCanvas(previewCanvas);
+        releaseCanvas(cleanCanvas);
+        try {
+          sourcePage?.cleanup(true);
+        } catch {
+          // The document-level cleanup below remains the final backstop.
+        }
+      }
+    }
+
+    const info = metadata?.info as { Title?: string; Author?: string } | undefined;
+    onProgress?.({ phase: "ready", completed: pdf.numPages, total: pdf.numPages });
+    completed = true;
+    return {
+      bytes,
+      document: {
+        id: stableId("document"),
+        metadata: {
+          filename: file.name,
+          title: info?.Title,
+          author: info?.Author,
+          pageCount: pdf.numPages,
+          createdAt: new Date().toISOString(),
+          processingMode: "browser",
+        },
+        pages,
+        operations: [],
       },
-      pages,
-      operations: [],
-    },
-  };
+    };
   } finally {
-    await localOcr?.terminate();
+    await boundedCleanup(localOcr?.terminate(), "stopping local OCR");
+    if (pdf) await boundedCleanup(pdf.cleanup(true), "cleaning PDF resources");
+    const retainedFonts = completed && pdf ? detachPdfFontFaces(pdf) : new Set<FontFace>();
+    await boundedCleanup(requestLoadingTaskDestroy(), "stopping the PDF worker");
+    if (completed) replaceRetainedPdfFontFaces(retainedFonts);
   }
 }
 

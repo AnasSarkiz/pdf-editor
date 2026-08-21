@@ -93,6 +93,63 @@ function escapeRegularExpression(value: string): string {
 
 const MIN_TEXT_BOX_WIDTH = 24;
 const MIN_TEXT_BOX_HEIGHT = 20;
+const PDF_IMPORT_STALL_TIMEOUT_MS = 3 * 60 * 1_000;
+
+class PdfImportTimeoutError extends Error {
+  constructor() {
+    super("No PDF import progress was received for three minutes.");
+    this.name = "PdfImportTimeoutError";
+  }
+}
+
+function importPdfWithStallTimeout(
+  file: File,
+  onProgress: (progress: PdfLoadProgress) => void,
+): ReturnType<typeof importPdf> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeoutId: number | undefined;
+    const clearTimer = () => {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    };
+    const resetTimer = () => {
+      clearTimer();
+      timeoutId = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new PdfImportTimeoutError());
+      }, PDF_IMPORT_STALL_TIMEOUT_MS);
+    };
+    resetTimer();
+    void importPdf(file, (nextProgress) => {
+      if (settled) return;
+      onProgress(nextProgress);
+      resetTimer();
+    }).then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimer();
+        resolve(result);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimer();
+        reject(error);
+      },
+    );
+  });
+}
+
+function importProgressMessage(progress: PdfLoadProgress): string {
+  const pageNumber = Math.min(progress.total, progress.completed + 1);
+  if (progress.phase === "opening") return "Opening the PDF locally…";
+  if (progress.phase === "extracting") return `Reading page ${pageNumber} of ${progress.total}…`;
+  if (progress.phase === "recognizing") return `Recognizing scan page ${pageNumber} of ${progress.total} locally — the first scan can take longer on a phone…`;
+  if (progress.phase === "rendering") return `Preparing page ${pageNumber} of ${progress.total} for editing…`;
+  return "Finishing the editable document…";
+}
 
 function textHorizontalScale(object: TextBlock): number {
   if (object.source !== "native-pdf") return 1;
@@ -150,6 +207,8 @@ export default function Home() {
   const [isImporting, setIsImporting] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const importInFlightRef = useRef(false);
+  const importRequestRef = useRef(0);
 
   const page = documentModel.pages[currentPageIndex] ?? documentModel.pages[0];
   const selected = useMemo(() => (selectedId ? findObject(documentModel, selectedId)?.object ?? null : null), [documentModel, selectedId]);
@@ -347,21 +406,35 @@ export default function Home() {
   }
 
   async function onFileChange(event: ChangeEvent<HTMLInputElement>): Promise<void> {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    if (file.size > 100 * 1024 * 1024) {
-      setNotice("This proof of concept limits local files to 100 MB.");
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) {
+      input.value = "";
       return;
     }
-    const signature = new TextDecoder().decode(await file.slice(0, 5).arrayBuffer());
-    if (signature !== "%PDF-") {
-      setNotice("The file signature is not a PDF. Choose a valid PDF file.");
+    if (importInFlightRef.current) {
+      input.value = "";
+      setNotice("A PDF is already opening. Wait for it to finish before choosing another file.");
       return;
     }
+    const requestId = ++importRequestRef.current;
+    importInFlightRef.current = true;
     try {
       setIsImporting(true);
       setProgress({ phase: "opening", completed: 0, total: 1 });
-      const imported = await importPdf(file, setProgress);
+      if (file.size > 100 * 1024 * 1024) {
+        setNotice("This proof of concept limits local files to 100 MB.");
+        return;
+      }
+      const signature = new TextDecoder().decode(await file.slice(0, 5).arrayBuffer());
+      if (signature !== "%PDF-") {
+        setNotice("The file signature is not a PDF. Choose a valid PDF file.");
+        return;
+      }
+      const imported = await importPdfWithStallTimeout(file, (nextProgress) => {
+        if (importRequestRef.current === requestId) setProgress(nextProgress);
+      });
+      if (importRequestRef.current !== requestId) return;
       setDocumentModel(imported.document);
       setOriginalBytes(imported.bytes);
       setHistory({ entries: [], cursor: 0 });
@@ -370,11 +443,19 @@ export default function Home() {
       const ocrTextCount = imported.document.pages.flatMap((entry) => entry.objects).filter((object) => object.type === "text" && object.source === "ocr").length;
       setNotice(ocrTextCount ? `${file.name} opened locally. ${ocrTextCount} Arabic + English OCR blocks were recognized at 300 dpi.` : `${file.name} opened locally. Native text is semantic; scanned regions are marked for OCR review.`);
     } catch (error) {
-      setNotice(error instanceof Error ? `Unable to open PDF: ${error.message}` : "Unable to open this PDF.");
+      if (importRequestRef.current !== requestId) return;
+      setNotice(error instanceof PdfImportTimeoutError
+        ? `${file.name} stopped opening because it made no progress for three minutes. The current document was left unchanged; try a smaller PDF or close other browser tabs.`
+        : error instanceof Error
+          ? `Unable to open PDF: ${error.message}`
+          : "Unable to open this PDF.");
     } finally {
-      setIsImporting(false);
-      setProgress(null);
-      event.target.value = "";
+      input.value = "";
+      if (importRequestRef.current === requestId) {
+        importInFlightRef.current = false;
+        setIsImporting(false);
+        setProgress(null);
+      }
     }
   }
 
@@ -447,7 +528,7 @@ export default function Home() {
         <div className="topbar-actions">
           <button className="quiet-button" onClick={undo} disabled={history.cursor === 0} aria-label="Undo">↶</button>
           <button className="quiet-button" onClick={redo} disabled={history.cursor >= history.entries.length} aria-label="Redo">↷</button>
-          <button className="open-button" onClick={() => inputRef.current?.click()}>{isImporting ? "Opening…" : "Open PDF"}</button>
+          <button className="open-button" onClick={() => inputRef.current?.click()} disabled={isImporting}>{isImporting ? "Opening…" : "Open PDF"}</button>
           <button className="export-button" onClick={handleExport} disabled={isExporting}>{isExporting ? "Exporting…" : "Export PDF"} <span>↗</span></button>
           <input ref={inputRef} onChange={onFileChange} accept="application/pdf,.pdf" type="file" hidden />
         </div>
@@ -545,13 +626,13 @@ export default function Home() {
         </aside>
       </section>
 
-      <footer className="statusbar">
+      <footer className="statusbar" role="status" aria-live="polite" aria-atomic="true">
         <span className="status-led" />
-        <span>{notice}</span>
+        <span className="status-message">{progress ? importProgressMessage(progress) : notice}</span>
         {progress && <span className="progress-text">{progress.phase} · {progress.completed}/{progress.total}</span>}
         <span className="status-spacer" />
-        <span>{documentModel.pages.reduce((total, entry) => total + entry.objects.length, 0)} semantic objects</span>
-        <span>Browser-only</span>
+        <span className="status-summary">{documentModel.pages.reduce((total, entry) => total + entry.objects.length, 0)} semantic objects</span>
+        <span className="status-summary">Browser-only</span>
       </footer>
     </main>
   );
