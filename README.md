@@ -17,6 +17,8 @@ The editor keeps document work local to the browser: it opens a PDF, builds an e
 - Search and replace semantic Arabic or English text.
 - Review OCR/extraction confidence and inspect the page layer stack.
 - Undo and redo text/object edits.
+- Use the Pan tool to drag around zoomed pages without moving document objects.
+- Navigate text blocks with a keyboard: Space selects and Enter starts editing editable text.
 
 ### OCR and language support
 
@@ -38,11 +40,20 @@ The editor keeps document work local to the browser: it opens a PDF, builds an e
 3. Use the inspector to change text formatting, direction, and spacing.
 4. Select **Export PDF**. The browser downloads an `-edited.pdf` file.
 
+### Phones and tablets
+
+- The first PDF open warms the PDF engine in the background; later opens reuse the browser cache.
+- Swipe over unselected text to scroll normally. Select a text block first when you intend to move or resize it.
+- Choose **Pan** to drag anywhere on a zoomed page without changing objects.
+- Import progress identifies whether the browser is reading the file, loading the PDF engine, extracting text, rendering, or running OCR.
+- Keep the tab open while local OCR runs. Image-only scans require more memory and time than native-text PDFs.
+
 ## Privacy and security
 
 - PDF parsing, rendering, text extraction, and OCR run in the browser.
 - Page imagery and scanned-page OCR input are not uploaded by this application.
 - OCR language models may download to the browser the first time OCR is used.
+- Imported PDF contents stay on the device; the hosted application downloads only its own code and optional OCR language models.
 - There is no permanent redaction capability yet. Do not use visual text cover-ups to redact legal, regulatory, or high-risk information; that requires the planned verified sanitization worker.
 
 ## Development
@@ -51,6 +62,7 @@ The editor keeps document work local to the browser: it opens a PDF, builds an e
 bun install
 bun run dev
 bun run lint
+bunx tsc --noEmit --incremental false
 bun test
 bun run build
 ```

@@ -212,9 +212,11 @@ export default function Home() {
   const [inlineEditing, setInlineEditing] = useState<string | null>(null);
   const [isImporting, setIsImporting] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const importInFlightRef = useRef(false);
   const importRequestRef = useRef(0);
+  const canvasPanRef = useRef<{ pointerId: number; startX: number; startY: number; scrollLeft: number; scrollTop: number } | null>(null);
 
   const page = documentModel.pages[currentPageIndex] ?? documentModel.pages[0];
   const selected = useMemo(() => (selectedId ? findObject(documentModel, selectedId)?.object ?? null : null), [documentModel, selectedId]);
@@ -498,6 +500,35 @@ export default function Home() {
     if (event.key === "Escape") setInlineEditing(null);
   }
 
+  function startCanvasPan(event: ReactPointerEvent<HTMLElement>): void {
+    if (activeTool !== "hand" || (event.pointerType === "mouse" && event.button !== 0)) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    canvasPanRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: event.currentTarget.scrollLeft,
+      scrollTop: event.currentTarget.scrollTop,
+    };
+    setIsPanning(true);
+  }
+
+  function updateCanvasPan(event: ReactPointerEvent<HTMLElement>): void {
+    const pan = canvasPanRef.current;
+    if (!pan || pan.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.currentTarget.scrollLeft = pan.scrollLeft - (event.clientX - pan.startX);
+    event.currentTarget.scrollTop = pan.scrollTop - (event.clientY - pan.startY);
+  }
+
+  function finishCanvasPan(event: ReactPointerEvent<HTMLElement>): void {
+    if (canvasPanRef.current?.pointerId !== event.pointerId) return;
+    canvasPanRef.current = null;
+    setIsPanning(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const modifier = event.metaKey || event.ctrlKey;
@@ -553,7 +584,13 @@ export default function Home() {
       <section className="tool-row" aria-label="Document tools">
         <div className="tool-list">
           {tools.map((tool) => (
-            <button key={tool.id} className={`tool-button ${activeTool === tool.id ? "is-active" : ""}`} onClick={() => tool.id === "text" ? addText() : setActiveTool(tool.id)} aria-pressed={activeTool === tool.id}>
+            <button key={tool.id} className={`tool-button ${activeTool === tool.id ? "is-active" : ""}`} onClick={() => {
+              if (tool.id === "text") addText();
+              else {
+                setActiveTool(tool.id);
+                if (tool.id === "hand") setNotice("Pan is active — drag anywhere on the page to move around without changing objects.");
+              }
+            }} aria-pressed={activeTool === tool.id}>
               <span>{tool.mark}</span>{tool.label}
             </button>
           ))}
@@ -588,7 +625,14 @@ export default function Home() {
           <button className="add-page" onClick={() => setNotice("Page creation is queued for the reconstruction worker; native page reordering remains non-destructive.")}>＋ Add page</button>
         </aside>
 
-        <section className="canvas-zone" aria-label="Editable PDF canvas">
+        <section
+          className={`canvas-zone ${activeTool === "hand" ? "is-pan-mode" : ""} ${isPanning ? "is-panning" : ""}`}
+          aria-label="Editable PDF canvas"
+          onPointerDown={startCanvasPan}
+          onPointerMove={updateCanvasPan}
+          onPointerUp={finishCanvasPan}
+          onPointerCancel={finishCanvasPan}
+        >
           <div className="canvas-toolbar">
             <div className="crumb">Page {page.number} <span>/</span> {documentModel.metadata.pageCount}</div>
             <div className={`analysis-chip ${page.analysisStatus === "needs-review" ? "needs-review" : ""}`}><span /> {page.sourceKind === "scan" ? ocrTextCount ? `Local OCR · 300 dpi · ${ocrTextCount} blocks` : "OCR review" : page.sourceKind === "hybrid" ? "Hybrid analysis" : "Native extraction"}</div>
@@ -611,6 +655,7 @@ export default function Home() {
                   showContent={object.type !== "text" || shouldRenderTextContent(object, Boolean(page.background), object.id === inlineEditing)}
                   replacementPreview={object.type === "text" && isTextReplacementPreview(object, Boolean(page.background), object.id === inlineEditing)}
                   mutable={object.type !== "text" || canSafelyMutateText(object)}
+                  panMode={activeTool === "hand"}
                   selected={selectedId === object.id}
                   matched={matchingIds.has(object.id)}
                   onSelect={() => { setSelectedId(object.id); setActiveTool("select"); }}
@@ -654,12 +699,12 @@ export default function Home() {
   );
 }
 
-function SemanticObject({ object, pageWidth, pageHeight, selected, matched, showContent, replacementPreview, mutable, editing, onSelect, onEdit, onTextCommit, onEditEnd, onMove, onResize }: { object: PageObject; pageWidth: number; pageHeight: number; selected: boolean; matched: boolean; showContent: boolean; replacementPreview: boolean; mutable: boolean; editing: boolean; onSelect: () => void; onEdit: () => void; onTextCommit: (value: string, bbox?: Rect) => void; onEditEnd: () => void; onMove: (bbox: Rect) => void; onResize: (bbox: Rect) => void }) {
+function SemanticObject({ object, pageWidth, pageHeight, selected, matched, showContent, replacementPreview, mutable, panMode, editing, onSelect, onEdit, onTextCommit, onEditEnd, onMove, onResize }: { object: PageObject; pageWidth: number; pageHeight: number; selected: boolean; matched: boolean; showContent: boolean; replacementPreview: boolean; mutable: boolean; panMode: boolean; editing: boolean; onSelect: () => void; onEdit: () => void; onTextCommit: (value: string, bbox?: Rect) => void; onEditEnd: () => void; onMove: (bbox: Rect) => void; onResize: (bbox: Rect) => void }) {
   const [draftText, setDraftText] = useState(object.type === "text" ? object.text : "");
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
   const [draftBbox, setDraftBbox] = useState<Rect | null>(null);
   const [resizeBbox, setResizeBbox] = useState<Rect | null>(null);
-  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; startBbox: Rect; paper: DOMRect; offset: { x: number; y: number } } | null>(null);
+  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; startBbox: Rect; paper: DOMRect; offset: { x: number; y: number }; active: boolean } | null>(null);
   const resizeRef = useRef<{ pointerId: number; startX: number; startY: number; startBbox: Rect; paper: DOMRect; bbox: Rect } | null>(null);
   const isDragging = dragOffset !== null;
   const displayBbox = resizeBbox ?? draftBbox ?? object.bbox;
@@ -688,15 +733,17 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     onEdit();
   };
   const startDragging = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!mutable || editing || (event.pointerType === "mouse" && event.button !== 0)) return;
+    if (panMode || !mutable || editing || (event.pointerType === "mouse" && event.button !== 0)) return;
     const paper = event.currentTarget.parentElement?.getBoundingClientRect();
     if (!paper) return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startBbox: { ...object.bbox }, paper, offset: { x: 0, y: 0 } };
+    dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startBbox: { ...object.bbox }, paper, offset: { x: 0, y: 0 }, active: false };
   };
   const updateDragging = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+    drag.active = true;
     const nextX = clamp(drag.startBbox.x + ((event.clientX - drag.startX) / drag.paper.width) * pageWidth, 0, Math.max(0, pageWidth - drag.startBbox.width));
     const nextY = clamp(drag.startBbox.y + ((event.clientY - drag.startY) / drag.paper.height) * pageHeight, 0, Math.max(0, pageHeight - drag.startBbox.height));
     drag.offset = { x: nextX - drag.startBbox.x, y: nextY - drag.startBbox.y };
@@ -708,7 +755,7 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     dragRef.current = null;
     const offset = drag.offset;
     setDragOffset(null);
-    if (Math.abs(offset.x) < 0.5 && Math.abs(offset.y) < 0.5) return;
+    if (!drag.active || (Math.abs(offset.x) < 0.5 && Math.abs(offset.y) < 0.5)) return;
     event.preventDefault();
     event.stopPropagation();
     onMove({ ...drag.startBbox, x: drag.startBbox.x + offset.x, y: drag.startBbox.y + offset.y });
@@ -765,7 +812,19 @@ function SemanticObject({ object, pageWidth, pageHeight, selected, matched, show
     letterSpacing: `${object.style.letterSpacing / pageWidth * 100}cqw`,
     textAlign: object.style.align,
   };
-  return <div className={`semantic-object text-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""} ${showContent || isDragging ? "show-content" : ""} ${replacementPreview ? "is-replacement-preview" : ""} ${isDragging ? "is-dragging" : ""} ${mutable ? "" : "is-locked"}`} style={style} onClick={(event) => { event.stopPropagation(); onSelect(); }} onDoubleClick={startEditing} onPointerDown={startDragging} onPointerMove={updateDragging} onPointerUp={finishDragging} onPointerCancel={cancelDragging} role="button" tabIndex={0} aria-label={`Text: ${objectLabel(object)}${replacementPreview ? " (edited preview)" : ""}${mutable ? "" : " (locked source text)"}`}>
+  return <div className={`semantic-object text-object ${selected ? "is-selected" : ""} ${matched ? "is-matched" : ""} ${showContent || isDragging ? "show-content" : ""} ${replacementPreview ? "is-replacement-preview" : ""} ${isDragging ? "is-dragging" : ""} ${panMode ? "is-pan-mode" : ""} ${mutable ? "" : "is-locked"}`} style={style} onClick={(event) => { if (panMode) return; event.stopPropagation(); onSelect(); }} onDoubleClick={() => !panMode && startEditing()} onKeyDown={(event) => {
+    if (editing || panMode) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      onSelect();
+      startEditing();
+    } else if (event.key === " ") {
+      event.preventDefault();
+      event.stopPropagation();
+      onSelect();
+    }
+  }} onPointerDown={startDragging} onPointerMove={updateDragging} onPointerUp={finishDragging} onPointerCancel={cancelDragging} role="button" tabIndex={0} aria-label={`Text: ${objectLabel(object)}${replacementPreview ? " (edited preview)" : ""}${mutable ? "" : " (locked source text)"}`}>
     {editing ? <textarea autoFocus wrap="off" value={draftText} dir={object.direction === "auto" ? undefined : object.direction} style={textStyle} onChange={(event) => { const value = event.target.value; setDraftText(value); setDraftBbox(fitTextBounds(value, object.bbox, pageWidth, pageHeight, object.style, object.bbox, textHorizontalScale(object))); }} onBlur={finishEditing} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDraftText(object.text); setDraftBbox(null); onEditEnd(); } }} /> : <span dir={object.direction === "auto" ? undefined : object.direction} style={textStyle}>{showContent || isDragging ? object.text : ""}</span>}
     {selected && mutable && !editing && <button className="text-resize-handle" aria-label="Resize text box" title="Drag to resize text box" onClick={(event) => event.stopPropagation()} onPointerDown={startResizing} onPointerMove={updateResizing} onPointerUp={finishResizing} onPointerCancel={cancelResizing} />}
     {selected && !replacementPreview && <span className="object-source">{object.source === "native-pdf" ? "native" : object.source}</span>}

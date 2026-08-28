@@ -96,5 +96,21 @@ test("phone layout clears desktop width floors and keeps primary actions reachab
   assert.match(html, /class="open-button"[^>]*>Open PDF<\/button>/);
   assert.match(html, /class="export-button"[^>]*>Export PDF/);
   assert.match(html, /class="page-sidebar" aria-label="Pages"/);
-  assert.match(html, /class="canvas-zone" aria-label="Editable PDF canvas"/);
+  assert.match(html, /class="canvas-zone[^"]*" aria-label="Editable PDF canvas"/);
+});
+
+test("pan and touch interactions protect document objects", async () => {
+  const [page, css] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(page, /className=\{`canvas-zone \$\{activeTool === "hand" \? "is-pan-mode"/);
+  assert.match(page, /scrollLeft = pan\.scrollLeft -/);
+  assert.match(page, /Math\.hypot\([\s\S]*?\) < 6/);
+  assert.match(page, /event\.key === "Enter"/);
+  assert.match(css, /\.canvas-zone\.is-pan-mode\s*\{[^}]*touch-action:\s*none/s);
+  assert.match(css, /\.canvas-zone\.is-pan-mode \.semantic-object\s*\{[^}]*pointer-events:\s*none/s);
+  assert.match(css, /\.text-object\s*\{[^}]*touch-action:\s*pan-x pan-y/s);
+  assert.match(css, /@media \(pointer: coarse\)[\s\S]*?\.text-resize-handle\s*\{[^}]*width:\s*28px/s);
 });

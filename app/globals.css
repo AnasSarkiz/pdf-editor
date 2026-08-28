@@ -70,6 +70,9 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .add-page:hover { border-color: var(--teal); color: var(--teal-dark); }
 
 .canvas-zone { position: relative; min-width: 0; overflow: auto; padding: 17px 24px 40px; background-color: #e7eae5; background-image: radial-gradient(#d6dad4 .7px, transparent .7px); background-size: 16px 16px; }
+.canvas-zone.is-pan-mode { cursor: grab; touch-action: none; }
+.canvas-zone.is-pan-mode.is-panning { cursor: grabbing; user-select: none; }
+.canvas-zone.is-pan-mode .semantic-object { pointer-events: none; }
 .canvas-toolbar { position: sticky; top: 0; display: flex; align-items: center; justify-content: space-between; width: min(100%, 792px); margin: 0 auto 12px; color: #64706e; font-size: 10px; z-index: 1; }
 .crumb span { padding: 0 4px; color: #a0aaa6; }
 .analysis-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid #c7ddd7; border-radius: 99px; color: #39766e; background: #f1faf7; font-size: 10px; font-weight: 750; }
@@ -83,7 +86,8 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .semantic-object { position: absolute; margin: 0; padding: 0; border: 0; outline: 0; background: transparent; }
 .semantic-object.is-selected { z-index: 5; outline: 1.5px solid #25a998; box-shadow: 0 0 0 2px rgba(37,169,152,.16); }
 .semantic-object.is-matched { background: rgba(240,193,74,.25); box-shadow: 0 0 0 2px rgba(240,193,74,.38); }
-.text-object { min-height: 15px; cursor: grab; touch-action: none; }
+.text-object { min-height: 15px; cursor: grab; touch-action: pan-x pan-y; }
+.text-object.is-selected { touch-action: none; }
 .text-object.is-dragging { cursor: grabbing; }
 .text-object:has(textarea) { cursor: text; }
 .text-object > span { display: block; width: 100%; height: 100%; overflow: visible; white-space: pre; unicode-bidi: plaintext; }
@@ -92,6 +96,9 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .text-object textarea { display: block; width: 100%; min-height: 100%; resize: none; border: 1px solid var(--teal); outline: 0; background: transparent; padding: 1px 2px; white-space: pre; unicode-bidi: plaintext; text-rendering: geometricPrecision; -webkit-font-smoothing: antialiased; }
 .text-resize-handle { position: absolute; right: -6px; bottom: -6px; z-index: 2; width: 12px; height: 12px; padding: 0; border: 2px solid #fff; border-radius: 2px; background: var(--teal); box-shadow: 0 1px 3px rgba(20, 49, 45, .28); cursor: nwse-resize; touch-action: none; }
 .text-resize-handle:hover { background: #23aa9d; transform: scale(1.12); }
+@media (pointer: coarse) {
+  .text-resize-handle { right: -12px; bottom: -12px; width: 28px; height: 28px; border-radius: 7px; }
+}
 .object-source { position: absolute; left: -1px; top: calc(100% + 4px); padding: 2px 4px; color: #fff; background: var(--teal-dark); font-size: 1.1cqw; font-weight: 700; line-height: 1; text-transform: uppercase; }
 .table-object { border: 1px dashed rgba(59,101,99,.74); background: linear-gradient(90deg, rgba(31,119,111,.06) 1px, transparent 1px), linear-gradient(rgba(31,119,111,.06) 1px, transparent 1px); background-size: 33.333% 33.333%; cursor: pointer; }
 .table-object.is-selected { border-style: solid; }
