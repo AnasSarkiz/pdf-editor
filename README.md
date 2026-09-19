@@ -7,6 +7,15 @@ The editor keeps document work local to the browser: it opens a PDF, builds an e
 **Live editor:** [Open PDF Editor](https://naskh-studio-pdf-editor.anassoftwaredev.chatgpt.site)
 **Repository:** [github.com/AnasSarkiz/pdf-editor](https://github.com/AnasSarkiz/pdf-editor)
 
+## Recent improvements
+
+- **More reliable mobile imports:** the PDF engine warms in the background, uses a smaller worker bundle, validates the PDF from a single bounded file read, and reports each import stage instead of leaving an indefinite spinner.
+- **Phone-sized workspace:** the editor now fits narrow viewports, respects device safe areas, keeps Open and Export reachable, and uses a horizontal page strip on small screens.
+- **Safer touch editing:** unselected text no longer blocks normal page scrolling, small finger jitter is ignored, and resize handles are larger on touch devices.
+- **Working Pan tool:** Pan mode drags a zoomed page without selecting, moving, or resizing document objects.
+- **Keyboard access:** Space selects a focused text block and Enter starts editing when the source block is safe to modify.
+- **Source-aware export safety:** unsupported typography, reconstructed native text, Arabic shaping, and unsafe OCR cleanup are routed to a visual fallback or blocked instead of being silently exported incorrectly.
+
 ## What works today
 
 ### Edit and review
