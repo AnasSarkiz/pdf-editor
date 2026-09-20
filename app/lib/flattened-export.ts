@@ -1,4 +1,3 @@
-import { PDFDocument } from "pdf-lib";
 import type { DocumentPage, EditableDocument, TextBlock } from "./document-model";
 import { hasUnsafeNativeSourceMutation, hasUnsafeOcrSourceMutation, needsSourceCanvasReplacement } from "./editor-visibility";
 import { getNativeTextRestorationPlan, loadTextFonts, paintTextBlock, restoreTextSource } from "./text-compositor";
@@ -97,6 +96,7 @@ export async function exportFlattenedPdf(document: EditableDocument): Promise<Ui
   if (unsafeNativeEdit) {
     throw new Error("This native text edit crosses source graphics that cannot be reconstructed safely. Undo it or duplicate the text as a new editable object.");
   }
+  const { PDFDocument } = await import("pdf-lib");
   const pdf = await PDFDocument.create();
   for (const modelPage of document.pages) {
     const canvas = await flattenPage(modelPage);
