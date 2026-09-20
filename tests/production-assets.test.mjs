@@ -13,9 +13,18 @@ test("production PDF assets are compact and cacheable on mobile", async () => {
   assert.match(builtHeaders, expectedCacheRule);
 
   const assetsUrl = new URL("dist/client/assets/", projectRoot);
-  const workerFiles = (await readdir(assetsUrl)).filter((name) => /^pdf\.worker\.min-.*\.mjs$/u.test(name));
+  const assetFiles = await readdir(assetsUrl);
+  const workerFiles = assetFiles.filter((name) => /^pdf\.worker\.min-.*\.mjs$/u.test(name));
   assert.equal(workerFiles.length, 1, "the build should emit one minified PDF worker");
 
   const worker = await stat(new URL(workerFiles[0], assetsUrl));
   assert.ok(worker.size < 1_500_000, `minified PDF worker is unexpectedly large: ${worker.size} bytes`);
+
+  const pageFiles = assetFiles.filter((name) => /^page-.*\.js$/u.test(name));
+  assert.equal(pageFiles.length, 1, "the build should emit one editor page entry");
+  const pageEntry = await stat(new URL(pageFiles[0], assetsUrl));
+  assert.ok(
+    pageEntry.size < 150_000,
+    `editor entry unexpectedly includes deferred PDF export code: ${pageEntry.size} bytes`,
+  );
 });

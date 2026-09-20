@@ -1,4 +1,3 @@
-import { PDFDocument, StandardFonts, degrees, rgb } from "pdf-lib";
 import type { EditableDocument, PageObject, TextBlock } from "./document-model";
 import { hasUnsafeNativeSourceMutation, hasUnsafeOcrSourceMutation, needsSourceCanvasReplacement } from "./editor-visibility";
 
@@ -183,6 +182,7 @@ function textObjects(document: EditableDocument): Array<{ pageIndex: number; obj
 export async function exportPdf(document: EditableDocument, originalBytes?: Uint8Array): Promise<Uint8Array> {
   const readiness = getExportReadiness(document, originalBytes);
   if (!readiness.canExport) throw new Error(readiness.messages[0]);
+  const { PDFDocument, StandardFonts, degrees, rgb } = await import("pdf-lib");
   const pdf = originalBytes ? await PDFDocument.load(originalBytes, { ignoreEncryption: false, updateMetadata: false }) : await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
