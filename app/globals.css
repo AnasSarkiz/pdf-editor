@@ -46,6 +46,8 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .tool-button:hover { color: var(--ink); background: #f2f5f1; }
 .tool-button.is-active { color: var(--teal-dark); border-color: var(--teal); background: #edf8f5; }
 .tool-button.is-active > span { color: var(--teal-dark); }
+.inspector-toggle { display: none; align-items: center; justify-content: center; gap: 5px; height: 34px; padding: 0 9px; border: 1px solid #cad7d2; border-radius: 4px; color: #52615e; background: #fff; font-size: 10px; font-weight: 750; }
+.inspector-toggle.is-active { color: #fff; border-color: var(--teal); background: var(--teal); }
 .zoom-controls { display: flex; align-items: center; gap: 6px; color: #687472; font-size: 11px; }
 .zoom-controls button { width: 25px; height: 25px; border: 1px solid #d6ddda; border-radius: 4px; background: #fff; color: #53605f; font-size: 16px; line-height: 1; }
 .zoom-controls span { width: 38px; text-align: center; font-variant-numeric: tabular-nums; }
@@ -108,6 +110,7 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .selection-ruler span { display: inline-block; padding: 2px 4px; border-radius: 2px; color: #3f5350; background: #d8efea; font-size: 1.15cqw; font-variant-numeric: tabular-nums; }
 
 .inspector { min-height: 0; overflow: auto; background: #fbfbf8; border-left: 1px solid var(--line); }
+.inspector-mobile-header, .inspector-backdrop { display: none; }
 .inspector-tabs { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--line); }
 .inspector-tabs button { padding: 13px 2px 10px; border: 0; border-bottom: 2px solid transparent; color: #7d8987; background: transparent; font-size: 9px; font-weight: 800; letter-spacing: .035em; text-transform: uppercase; }
 .inspector-tabs button.is-active { color: var(--teal-dark); border-color: var(--teal); }
@@ -205,7 +208,32 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 @media (max-width: 800px) {
   .studio-shell { grid-template-rows: 57px 45px minmax(0, 1fr) 48px; }
   .workspace { min-width: 0; overflow: hidden; grid-template-columns: 72px minmax(0, 1fr); }
-  .inspector { display: none; }
+  .inspector-toggle { display: inline-flex; flex: 0 0 auto; }
+  .inspector-backdrop { position: fixed; inset: 0; z-index: 19; display: block; border: 0; background: rgba(23, 32, 38, .38); }
+  .inspector {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 20;
+    display: block;
+    max-height: min(72dvh, 620px);
+    padding-bottom: env(safe-area-inset-bottom);
+    overflow: auto;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+    border-radius: 14px 14px 0 0;
+    box-shadow: 0 -18px 45px rgba(23, 32, 38, .22);
+    transform: translateY(105%);
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform .2s ease, visibility 0s linear .2s;
+  }
+  .inspector.is-mobile-open { transform: translateY(0); visibility: visible; pointer-events: auto; transition-delay: 0s; }
+  .inspector-mobile-header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; min-height: 48px; padding: 7px 12px 7px 17px; border-bottom: 1px solid var(--line); background: #fbfbf8; }
+  .inspector-mobile-header strong { color: #31413e; font-size: 12px; }
+  .inspector-mobile-header button { width: 36px; height: 36px; border: 0; border-radius: 50%; color: #51615e; background: #edf1ee; font-size: 22px; line-height: 1; }
+  .inspector-tabs { position: sticky; top: 48px; z-index: 1; background: #fbfbf8; }
   .page-sidebar { padding: 12px 7px; }
   .thumbnail { grid-template-columns: 1fr; }
   .thumbnail > span { text-align: center; }
@@ -268,6 +296,8 @@ button:disabled { cursor: not-allowed; opacity: .42; }
   }
   .tool-list { flex: 1 1 auto; min-width: 0; overscroll-behavior-inline: contain; }
   .tool-button { flex: 0 0 auto; min-width: 40px; min-height: 40px; }
+  .inspector-toggle { width: 42px; height: 36px; padding: 0; font-size: 0; }
+  .inspector-toggle span { font-size: 17px; }
   .zoom-controls { flex: 0 0 auto; }
   .zoom-controls button:not(.fit-button), .zoom-controls > span { display: none; }
   .zoom-controls .fit-button { min-width: 68px; height: 36px; padding: 0 8px; }
