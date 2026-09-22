@@ -213,7 +213,10 @@ export default function Home() {
   const [isImporting, setIsImporting] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
+  const [isCompactLayout, setIsCompactLayout] = useState(false);
+  const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const inspectorToggleRef = useRef<HTMLButtonElement>(null);
   const importInFlightRef = useRef(false);
   const importRequestRef = useRef(0);
   const canvasPanRef = useRef<{ pointerId: number; startX: number; startY: number; scrollLeft: number; scrollTop: number } | null>(null);
@@ -233,6 +236,17 @@ export default function Home() {
 
   useEffect(() => {
     warmPdfEngine();
+  }, []);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 800px)");
+    const syncLayout = () => {
+      setIsCompactLayout(mediaQuery.matches);
+      if (!mediaQuery.matches) setMobileInspectorOpen(false);
+    };
+    syncLayout();
+    mediaQuery.addEventListener("change", syncLayout);
+    return () => mediaQuery.removeEventListener("change", syncLayout);
   }, []);
 
   function commit(operation: EditOperation): void {
@@ -497,7 +511,15 @@ export default function Home() {
   }
 
   function handlePageKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
-    if (event.key === "Escape") setInlineEditing(null);
+    if (event.key === "Escape") {
+      setInlineEditing(null);
+      if (mobileInspectorOpen) closeMobileInspector();
+    }
+  }
+
+  function closeMobileInspector(): void {
+    setMobileInspectorOpen(false);
+    requestAnimationFrame(() => inspectorToggleRef.current?.focus());
   }
 
   function startCanvasPan(event: ReactPointerEvent<HTMLElement>): void {
@@ -595,6 +617,15 @@ export default function Home() {
             </button>
           ))}
         </div>
+        <button
+          ref={inspectorToggleRef}
+          className={`inspector-toggle ${mobileInspectorOpen ? "is-active" : ""}`}
+          aria-controls="document-inspector"
+          aria-expanded={mobileInspectorOpen}
+          onClick={() => setMobileInspectorOpen((open) => !open)}
+        >
+          <span aria-hidden="true">☷</span> Inspect
+        </button>
         <div className="zoom-controls">
           <button onClick={() => setZoom((value) => Math.max(60, value - 10))}>−</button>
           <span>{zoom}%</span>
@@ -672,7 +703,18 @@ export default function Home() {
           </div>
         </section>
 
-        <aside className="inspector" aria-label="Document inspector">
+        {isCompactLayout && mobileInspectorOpen && <button className="inspector-backdrop" aria-label="Close document inspector" onClick={closeMobileInspector} />}
+        <aside
+          id="document-inspector"
+          className={`inspector ${mobileInspectorOpen ? "is-mobile-open" : ""}`}
+          aria-label="Document inspector"
+          aria-hidden={isCompactLayout && !mobileInspectorOpen}
+          inert={isCompactLayout && !mobileInspectorOpen}
+        >
+          <div className="inspector-mobile-header">
+            <strong>Document inspector</strong>
+            <button aria-label="Close document inspector" onClick={closeMobileInspector}>×</button>
+          </div>
           <nav className="inspector-tabs" aria-label="Inspector sections">
             {(["properties", "layers", "review", "search"] as Panel[]).map((panel) => <button key={panel} className={activePanel === panel ? "is-active" : ""} onClick={() => setActivePanel(panel)}>{panel}</button>)}
           </nav>

@@ -97,6 +97,8 @@ test("phone layout clears desktop width floors and keeps primary actions reachab
   assert.match(html, /class="export-button"[^>]*>Export PDF/);
   assert.match(html, /class="page-sidebar" aria-label="Pages"/);
   assert.match(html, /class="canvas-zone[^"]*" aria-label="Editable PDF canvas"/);
+  assert.match(html, /class="inspector-toggle[^"]*" aria-controls="document-inspector"/);
+  assert.match(html, /id="document-inspector" class="inspector[^"]*" aria-label="Document inspector"/);
 });
 
 test("pan and touch interactions protect document objects", async () => {
@@ -113,4 +115,21 @@ test("pan and touch interactions protect document objects", async () => {
   assert.match(css, /\.canvas-zone\.is-pan-mode \.semantic-object\s*\{[^}]*pointer-events:\s*none/s);
   assert.match(css, /\.text-object\s*\{[^}]*touch-action:\s*pan-x pan-y/s);
   assert.match(css, /@media \(pointer: coarse\)[\s\S]*?\.text-resize-handle\s*\{[^}]*width:\s*28px/s);
+});
+
+test("compact layouts expose the full inspector as a bottom drawer", async () => {
+  const [page, css] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  const tablet = mediaRuleBody(css, "@media (max-width: 800px)");
+
+  assert.match(page, /window\.matchMedia\("\(max-width: 800px\)"\)/);
+  assert.match(page, /aria-controls="document-inspector"/);
+  assert.match(page, /className={`inspector \$\{mobileInspectorOpen \? "is-mobile-open"/);
+  assert.match(page, /inert=\{isCompactLayout && !mobileInspectorOpen\}/);
+  assert.match(tablet, /\.inspector-toggle\s*\{[^}]*display:\s*inline-flex/s);
+  assert.match(tablet, /\.inspector\s*\{[^}]*position:\s*fixed[^}]*transform:\s*translateY\(105%\)/s);
+  assert.match(tablet, /\.inspector\.is-mobile-open\s*\{[^}]*transform:\s*translateY\(0\)/s);
+  assert.match(tablet, /\.inspector-backdrop\s*\{[^}]*position:\s*fixed/s);
 });
