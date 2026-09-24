@@ -133,3 +133,13 @@ test("compact layouts expose the full inspector as a bottom drawer", async () =>
   assert.match(tablet, /\.inspector\.is-mobile-open\s*\{[^}]*transform:\s*translateY\(0\)/s);
   assert.match(tablet, /\.inspector-backdrop\s*\{[^}]*position:\s*fixed/s);
 });
+
+test("icon-only and formatting controls expose accessible names and state", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  assert.match(page, /aria-label="Zoom out"/);
+  assert.match(page, /aria-label="Zoom in"/);
+  assert.match(page, /aria-label="Open mixed-language demo"/);
+  assert.match(page, /aria-label="Bold" aria-pressed=/);
+  assert.match(page, /aria-label="Italic" aria-pressed=/);
+});

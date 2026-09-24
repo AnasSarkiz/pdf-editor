@@ -627,16 +627,16 @@ export default function Home() {
           <span aria-hidden="true">☷</span> Inspect
         </button>
         <div className="zoom-controls">
-          <button onClick={() => setZoom((value) => Math.max(60, value - 10))}>−</button>
+          <button aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(60, value - 10))}>−</button>
           <span>{zoom}%</span>
-          <button onClick={() => setZoom((value) => Math.min(140, value + 10))}>+</button>
+          <button aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(140, value + 10))}>+</button>
           <button className="fit-button" onClick={() => setZoom(100)}>Fit width</button>
         </div>
       </section>
 
       <section className="workspace">
         <aside className="page-sidebar" aria-label="Pages">
-          <div className="side-title"><span>Pages</span><button onClick={resetDemo} title="Open mixed-language demo">↺</button></div>
+          <div className="side-title"><span>Pages</span><button aria-label="Open mixed-language demo" onClick={resetDemo} title="Open mixed-language demo">↺</button></div>
           <div className="thumbnails">
             {documentModel.pages.map((entry, index) => (
               <button className={`thumbnail ${index === currentPageIndex ? "is-current" : ""}`} key={entry.id} onClick={() => { setCurrentPageIndex(index); setSelectedId(null); }}>
@@ -986,7 +986,7 @@ function PropertiesPanel({ selected, onTextChange, onStyleChange, onRotationChan
       <label className="field-label">Font <select value={knownFont} onChange={(event) => { const family = fontFamilies[event.target.value]; if (family) onStyleChange({ fontFamily: family }); }}>{knownFont === "source" && <option value="source">Original · {selected.sourceFontName ?? selected.style.fontFamily.replace(/["']/g, "").split(",")[0]}</option>}<option value="inter">Inter</option><option value="helvetica">Helvetica</option><option value="times">Times</option><option value="courier">Courier</option><option value="arabic">Arabic</option><option value="arial">Arial</option></select></label>
       <label className="field-label">Size <input type="number" min="1" max="400" step="0.1" value={Math.round(selected.style.fontSize * 10) / 10} onChange={(event) => onStyleChange({ fontSize: clamp(Number(event.target.value) || 12, 1, 400) })} /></label>
     </div>
-    <div className="format-strip"><button className={selected.style.fontWeight >= 600 ? "is-on" : ""} onClick={() => onStyleChange({ fontWeight: selected.style.fontWeight >= 600 ? 400 : 700 })}><b>B</b></button><button className={selected.style.fontStyle === "italic" ? "is-on" : ""} onClick={() => onStyleChange({ fontStyle: selected.style.fontStyle === "italic" ? "normal" : "italic" })}><i>I</i></button><input aria-label="Text color" type="color" value={selected.style.color} onChange={(event) => onStyleChange({ color: event.target.value })} /><span /></div>
+    <div className="format-strip"><button aria-label="Bold" aria-pressed={selected.style.fontWeight >= 600} className={selected.style.fontWeight >= 600 ? "is-on" : ""} onClick={() => onStyleChange({ fontWeight: selected.style.fontWeight >= 600 ? 400 : 700 })}><b>B</b></button><button aria-label="Italic" aria-pressed={selected.style.fontStyle === "italic"} className={selected.style.fontStyle === "italic" ? "is-on" : ""} onClick={() => onStyleChange({ fontStyle: selected.style.fontStyle === "italic" ? "normal" : "italic" })}><i>I</i></button><input aria-label="Text color" type="color" value={selected.style.color} onChange={(event) => onStyleChange({ color: event.target.value })} /><span /></div>
     <div className="field-grid">
       <label className="field-label">Align <select value={selected.style.align} onChange={(event) => onStyleChange({ align: event.target.value as TextStyle["align"] })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
       <label className="field-label">Rotation <input type="number" min="-180" max="180" value={Math.round(selected.rotation)} onChange={(event) => onRotationChange(Number(event.target.value) || 0)} /></label>
