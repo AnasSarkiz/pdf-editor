@@ -639,7 +639,13 @@ export default function Home() {
           <div className="side-title"><span>Pages</span><button aria-label="Open mixed-language demo" onClick={resetDemo} title="Open mixed-language demo">↺</button></div>
           <div className="thumbnails">
             {documentModel.pages.map((entry, index) => (
-              <button className={`thumbnail ${index === currentPageIndex ? "is-current" : ""}`} key={entry.id} onClick={() => { setCurrentPageIndex(index); setSelectedId(null); }}>
+              <button
+                aria-current={index === currentPageIndex ? "page" : undefined}
+                aria-label={`Open page ${index + 1}`}
+                className={`thumbnail ${index === currentPageIndex ? "is-current" : ""}`}
+                key={entry.id}
+                onClick={() => { setCurrentPageIndex(index); setSelectedId(null); }}
+              >
                 <div
                   className={`thumbnail-paper ${entry.background ? "has-background" : ""}`}
                   style={{

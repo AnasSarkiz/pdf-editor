@@ -143,3 +143,10 @@ test("icon-only and formatting controls expose accessible names and state", asyn
   assert.match(page, /aria-label="Bold" aria-pressed=/);
   assert.match(page, /aria-label="Italic" aria-pressed=/);
 });
+
+test("page thumbnails announce their page number and current state", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  assert.match(page, /aria-label=\{`Open page \$\{index \+ 1\}`\}/);
+  assert.match(page, /aria-current=\{index === currentPageIndex \? "page" : undefined\}/);
+});
